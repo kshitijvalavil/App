@@ -22,3 +22,15 @@ Costs are estimates from list prices in `token_usage.py` (`PRICING`); edit that 
 - **Usage by project** — ranked share bar + table (sessions, tokens, cache hit, avg/peak context, top model & tool, $/session, share). Click any row, or use the **Project** filter, to scope the whole dashboard to one project.
 
 Claude plans don't expose their usage caps as token numbers, so the limit amounts are yours to set.
+
+## Running it on your own machine
+
+The dashboard reads the Claude logs on **your** computer (`~/.claude/projects`),
+so run it there, not in a cloud session:
+
+```bash
+pip install -r requirements.txt   # once
+python run_dashboard.py           # opens http://127.0.0.1:5000/tokens
+```
+
+Or the plain Flask way: `python MyAPP.py`, then open http://127.0.0.1:5000/tokens.
