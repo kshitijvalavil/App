@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, render_template_string, request
 
-from token_usage import analyze
+from token_usage import analyze, load_limits, save_limits
 
 bp = Blueprint("tokens", __name__)
 
@@ -39,7 +39,7 @@ HTML = r"""
   header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
   h1 { font-size: 1.5rem; }
   h2 { font-size: 1rem; margin-bottom: 12px; }
-  .sub { color: var(--ink-2); font-size: 13px; margin-top: 4px; word-break: break-all; }
+  .sub { color: var(--ink-2); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 14px; }
   select, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--ring); background: var(--surface); color: var(--ink); }
   button.primary { background: var(--accent); color: #fff; border: none; font-weight: 600; cursor: pointer; }
@@ -70,6 +70,35 @@ HTML = r"""
   th:first-child, td:first-child { text-align: left; }
   td.mono { font-family: ui-monospace, monospace; }
   .empty { color: var(--ink-2); padding: 24px 0; text-align: center; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card-head h2 { margin: 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .limit h3 { font-size: 14px; margin-bottom: 8px; }
+  .meter { margin-bottom: 10px; font-size: 13px; }
+  .meter .row { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-2); margin-bottom: 4px; }
+  .meter .row b { color: var(--ink); font-weight: 650; }
+  .track { height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+  .fill { height: 100%; border-radius: 4px; background: var(--s1); }
+  .fill.warning { background: var(--warning); } .fill.critical { background: var(--critical); }
+  .meter .left { margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .meter .left.warning { color: var(--ink); } .meter .left.critical { color: var(--critical); font-weight: 600; }
+  .unset { color: var(--muted); font-size: 13px; }
+  form.limits-form { display: none; margin-top: 16px; border-top: 1px solid var(--grid); padding-top: 16px; gap: 12px; }
+  form.limits-form.open { display: grid; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .form-grid fieldset { border: 1px solid var(--ring); border-radius: 8px; padding: 10px; display: grid; gap: 8px; font-size: 13px; }
+  .form-grid legend { font-weight: 600; padding: 0 4px; }
+  .form-grid label { display: grid; gap: 4px; color: var(--ink-2); }
+  input[type=number] { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--ring); background: var(--page); color: var(--ink); width: 100%; }
+  .lifetime { display: flex; flex-wrap: wrap; gap: 8px 32px; }
+  .lifetime div { font-size: 13px; color: var(--ink-2); }
+  .lifetime b { display: block; font-size: 1.25rem; color: var(--ink); font-weight: 650; }
+  .scope { display: none; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--accent); }
+  .scope.on { display: flex; }
+  tr.clickable { cursor: pointer; } tr.clickable:hover td { background: var(--grid); }
+  tr.selected td { font-weight: 650; }
+  button.link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 600; }
   .err { color: var(--critical); }
 </style>
 </head>
@@ -87,6 +116,9 @@ HTML = r"""
           <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option>
         </select>
       </label>
+      <label>Project
+        <select id="project"><option value="">All projects</option></select>
+      </label>
       <label>Auto-refresh
         <select id="auto">
           <option value="0">Off</option><option value="30">30s</option><option value="60">1 min</option><option value="300">5 min</option>
@@ -95,6 +127,29 @@ HTML = r"""
       <button class="primary" id="refresh">Refresh</button>
     </div>
   </header>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Limits &amp; what's left</h2>
+      <button class="link" id="editLimits" type="button">Edit limits</button>
+    </div>
+    <div class="limits" id="limits"></div>
+    <form class="limits-form" id="limitsForm">
+      <div class="form-grid" id="limitsFields"></div>
+      <label class="hint"><input type="checkbox" id="countCacheReads"> Count cache reads toward token limits (they are ~95% of raw tokens but bill at a fraction of input)</label>
+      <div><button class="primary" type="submit">Save limits</button> <button type="button" id="cancelLimits">Cancel</button> <span class="hint">Leave blank for no limit.</span></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Lifetime</h2><span class="hint" id="lifetimeSince"></span></div>
+    <div class="lifetime" id="lifetime"></div>
+  </section>
+
+  <section class="card scope" id="scope">
+    <div><b id="scopeName"></b><div class="hint">Project deep dive: everything below is filtered to this project.</div></div>
+    <button type="button" id="clearProject">&larr; All projects</button>
+  </section>
 
   <section class="tiles" id="tiles"></section>
 
@@ -126,10 +181,14 @@ HTML = r"""
     </div>
   </section>
 
+  <section class="card">
+    <div class="card-head"><h2>Usage by project</h2><span class="hint">Click a project to deep dive</span></div>
+    <div id="projectShare"></div>
+    <div class="table-wrap" id="projects"></div>
+  </section>
   <section class="card"><h2>Sessions (most expensive first)</h2><div class="table-wrap" id="sessions"></div></section>
   <section class="card"><h2>Tools (by text returned into context)</h2><div class="table-wrap" id="tools"></div></section>
   <section class="card"><h2>Most expensive requests</h2><div class="table-wrap" id="top"></div></section>
-  <section class="card"><h2>Projects</h2><div class="table-wrap" id="projects"></div></section>
 </main>
 <div id="tip"></div>
 
@@ -209,9 +268,9 @@ function stackedDays(days) {
   $("dayChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Stacked tokens per day">${g}</svg>`;
 }
 
-function hbars(el, rows, color) {
+function hbars(el, rows, color, W = 360) {
   if (!rows.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
-  const W = 360, rowH = 34, L = 0;
+  const rowH = 34, L = 0;
   const max = Math.max(...rows.map(r => r.value)) || 1;
   let g = "";
   rows.forEach((r, i) => {
@@ -240,10 +299,68 @@ function hours(rows) {
   $("hourChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Requests by hour, local time">${g}</svg>`;
 }
 
-function table(el, cols, rows) {
+function table(el, cols, rows, rowAttrs = () => "") {
   if (!rows.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
   el.innerHTML = `<table><thead><tr>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>`
-    + rows.map(r => `<tr>${cols.map(c => `<td class="${c[2] || ""}">${c[1](r)}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
+    + rows.map(r => `<tr ${rowAttrs(r)}>${cols.map(c => `<td class="${c[2] || ""}">${c[1](r)}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
+}
+
+const level = p => p >= 90 ? "critical" : p >= 75 ? "warning" : "";
+const until = ts => {
+  if (!ts) return "";
+  const ms = new Date(ts) - Date.now();
+  if (ms <= 0) return "now";
+  const h = Math.floor(ms / 3.6e6), m = Math.round((ms % 3.6e6) / 6e4);
+  return h >= 48 ? `in ${Math.round(h / 24)} days` : h ? `in ${h}h ${m}m` : `in ${m}m`;
+};
+function meter(name, used, limit, left, show) {
+  const p = Math.min(100, 100 * used / limit), lv = level(p);
+  return `<div class="meter"><div class="row"><span>${name}</span><span><b>${show(used)}</b> / ${show(limit)}</span></div>
+    <div class="track" role="progressbar" aria-valuenow="${p.toFixed(0)}" aria-valuemin="0" aria-valuemax="100"><div class="fill ${lv}" style="width:${p}%"></div></div>
+    <div class="left ${lv}">${lv === "critical" ? "✕ " : lv === "warning" ? "! " : ""}${show(left)} left · ${p.toFixed(0)}% used</div></div>`;
+}
+
+let limitsCfg = null;
+function renderLimits(lim) {
+  $("limits").innerHTML = lim.windows.map(w => {
+    const parts = [];
+    if (w.token_limit) parts.push(meter("Tokens", w.tokens, w.token_limit, w.tokens_left, fmt));
+    if (w.cost_limit) parts.push(meter("Cost", w.cost, w.cost_limit, w.cost_left, usd));
+    if (!parts.length) parts.push(`<div class="unset">No limit set · used ${fmt(w.tokens)} tokens, ${usd(w.cost)}</div>`);
+    const reset = w.requests ? `<div class="hint">${w.window === "month" ? "Resets" : "Oldest usage rolls off"} ${until(w.resets)}</div>` : "";
+    return `<div class="limit"><h3>${w.label}</h3>${parts.join("")}${reset}</div>`;
+  }).join("");
+}
+function openLimitsForm() {
+  const c = limitsCfg, labels = {"5h": "Last 5 hours", "7d": "Last 7 days", "month": "This month"};
+  $("limitsFields").innerHTML = Object.keys(labels).map(w => `<fieldset><legend>${labels[w]}</legend>
+    <label>Token limit<input type="number" min="0" step="1000" name="${w}.tokens" value="${c.limits[w].tokens ?? ""}" placeholder="e.g. 2000000"></label>
+    <label>Cost limit ($)<input type="number" min="0" step="0.01" name="${w}.cost" value="${c.limits[w].cost ?? ""}" placeholder="e.g. 50"></label></fieldset>`).join("");
+  $("countCacheReads").checked = c.count_cache_reads;
+  $("limitsForm").classList.add("open");
+}
+$("editLimits").onclick = async () => {
+  limitsCfg = await (await fetch("/api/limits", {cache: "no-store"})).json();
+  openLimitsForm();
+};
+$("cancelLimits").onclick = () => $("limitsForm").classList.remove("open");
+$("limitsForm").onsubmit = async e => {
+  e.preventDefault();
+  const body = {count_cache_reads: $("countCacheReads").checked, limits: {}};
+  for (const input of $("limitsFields").querySelectorAll("input")) {
+    const [w, k] = input.name.split(".");
+    (body.limits[w] ||= {})[k] = input.value === "" ? null : Number(input.value);
+  }
+  await fetch("/api/limits", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  $("limitsForm").classList.remove("open");
+  load();
+};
+
+function setProject(p) {
+  $("project").value = p;
+  schedule();
+  load();
+  scrollTo({top: 0, behavior: "smooth"});
 }
 
 function render(d) {
@@ -275,7 +392,31 @@ function render(d) {
   table($("tools"), [["Tool", r => esc(r.tool), "mono"], ["Calls", r => r.calls], ["Errors", r => r.errors], ["Est. tokens returned", r => fmt(r.result_tokens_est)], ["Avg / call", r => fmt(r.avg_result_tokens)]], d.tools);
   table($("top"), [["Time", r => when(r.timestamp)], ["Session", r => esc(r.session.slice(0, 8)), "mono"], ["Model", r => esc(r.model)], ["Context", r => fmt(r.context)],
     ["Output", r => fmt(r.output)], ["Tools", r => esc([...new Set(r.tools)].join(", ") || "—")], ["Cost", r => usd(r.cost)]], d.top_requests);
-  table($("projects"), [["Project", r => esc(r.project)], ["Requests", r => r.requests], ...tok, ["Cost", r => usd(r.cost)]], d.by_project);
+  const sel = d.project || "";
+  hbars($("projectShare"), d.projects.slice(0, 8).map(p => ({label: p.project, value: p.cost, color: p.project === sel ? "--s2" : "--s1",
+    text: `${usd(p.cost)} · ${pct(p.share)}`, tip: `<b>${esc(p.project)}</b>${fmt(p.total)} tokens<br>${p.sessions} sessions · ${p.requests} requests<br>${usd(p.cost)} (${pct(p.share)} of spend)`})), "--s1", 1100);
+  table($("projects"), [["Project", r => esc(r.project)], ["Sessions", r => r.sessions], ["Requests", r => r.requests],
+    ["Tokens", r => fmt(r.total)], ["Output", r => fmt(r.output)], ["Cache hit", r => pct(r.cache_hit_rate)], ["Avg context", r => fmt(r.avg_context)],
+    ["Peak context", r => fmt(r.max_context)], ["Top model", r => esc(r.top_model || "—")], ["Top tool", r => esc(r.top_tool || "—")],
+    ["Last active", r => when(r.last)], ["$/session", r => usd(r.cost_per_session)], ["Cost", r => usd(r.cost)], ["Share", r => pct(r.share)]],
+    d.projects, r => `class="clickable${r.project === sel ? " selected" : ""}" data-project="${esc(r.project)}"`);
+  $("projects").querySelectorAll("tr[data-project]").forEach(tr => tr.onclick = () => setProject(tr.dataset.project === sel ? "" : tr.dataset.project));
+
+  const ps = $("project"), keep = ps.value;
+  ps.innerHTML = '<option value="">All projects</option>' + d.projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
+  if (sel && !d.projects.some(p => p.project === sel)) ps.innerHTML += `<option value="${esc(sel)}">${esc(sel)}</option>`;
+  ps.value = keep;
+  $("scope").classList.toggle("on", !!sel);
+  $("scopeName").textContent = sel;
+
+  renderLimits(d.limits);
+  const L = d.lifetime;
+  $("lifetimeSince").textContent = L.first ? "since " + new Date(L.first).toLocaleDateString() : "";
+  $("lifetime").innerHTML = [
+    ["Total tokens", fmt(L.total)], [d.limits.count_cache_reads ? "Counted toward limits" : "Counted toward limits (excl. cache reads)", fmt(L.limit_tokens)],
+    ["Output tokens", fmt(L.output)], ["Estimated cost", usd(L.cost)], ["Requests", L.requests.toLocaleString()],
+    ["Sessions", L.sessions], ["Projects", L.projects],
+  ].map(([l, v]) => `<div>${l}<b>${v}</b></div>`).join("");
 }
 
 let timer = null;
@@ -283,8 +424,10 @@ async function load() {
   const btn = $("refresh");
   btn.disabled = true; btn.textContent = "Refreshing…";
   try {
-    const days = $("days").value;
-    const res = await fetch("/api/tokens" + (days ? "?days=" + days : ""), {cache: "no-store"});
+    const q = new URLSearchParams();
+    if ($("days").value) q.set("days", $("days").value);
+    if ($("project").value) q.set("project", $("project").value);
+    const res = await fetch("/api/tokens?" + q, {cache: "no-store"});
     if (!res.ok) throw new Error(res.status + " " + res.statusText);
     render(await res.json());
   } catch (e) {
@@ -296,13 +439,17 @@ async function load() {
 function schedule() {
   clearInterval(timer);
   const s = Number($("auto").value);
-  try { localStorage.setItem("tokens.auto", s); localStorage.setItem("tokens.days", $("days").value); } catch (e) {}
+  try { localStorage.setItem("tokens.auto", s); localStorage.setItem("tokens.days", $("days").value); localStorage.setItem("tokens.project", $("project").value); } catch (e) {}
   if (s) timer = setInterval(load, s * 1000);
 }
 try {
   $("auto").value = localStorage.getItem("tokens.auto") || "0";
   $("days").value = localStorage.getItem("tokens.days") || "";
+  const p = localStorage.getItem("tokens.project");
+  if (p) $("project").innerHTML += `<option value="${esc(p)}">${esc(p)}</option>`, $("project").value = p;
 } catch (e) {}
+$("project").onchange = () => setProject($("project").value);
+$("clearProject").onclick = () => setProject("");
 $("refresh").onclick = load;
 $("auto").onchange = schedule;
 $("days").onchange = () => { schedule(); load(); };
@@ -322,4 +469,12 @@ def dashboard():
 @bp.route("/api/tokens")
 def tokens_api():
     days = request.args.get("days", type=int)
-    return jsonify(analyze(days=days))
+    project = request.args.get("project") or None
+    return jsonify(analyze(days=days, project=project))
+
+
+@bp.route("/api/limits", methods=["GET", "POST"])
+def limits_api():
+    if request.method == "POST":
+        return jsonify(save_limits(request.get_json(force=True) or {}))
+    return jsonify(load_limits())

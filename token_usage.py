@@ -11,10 +11,20 @@ Set CLAUDE_LOGS_DIR to read transcripts from somewhere else.
 import json
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LOGS_DIR = Path(os.environ.get("CLAUDE_LOGS_DIR", Path.home() / ".claude" / "projects"))
+LIMITS_FILE = Path(os.environ.get("TOKEN_LIMITS_FILE", Path(__file__).with_name("limits.json")))
+
+# Rolling windows a limit can apply to. Claude plans meter usage over a 5-hour
+# session window and a weekly window but don't publish them as token counts,
+# so the amounts are yours to set.
+WINDOWS = {"5h": "Last 5 hours", "7d": "Last 7 days", "month": "This month"}
+DEFAULT_LIMITS = {
+    "count_cache_reads": False,
+    "limits": {w: {"tokens": None, "cost": None} for w in WINDOWS},
+}
 
 # USD per million tokens: (input, output, cache read). Cache writes are priced
 # off input: 1.25x for the 5-minute TTL, 2x for the 1-hour TTL.
@@ -71,8 +81,8 @@ def request_cost(model, u):
 def _usage(raw):
     cw = raw.get("cache_creation_input_tokens", 0) or 0
     split = raw.get("cache_creation") or {}
-    cw_1h = split.get("ephemeral_1h_input_tokens", 0) or 0
-    cw_5m = split.get("ephemeral_5m_input_tokens", cw - cw_1h) or 0
+    cw_1h = min(cw, split.get("ephemeral_1h_input_tokens", 0) or 0)
+    cw_5m = cw - cw_1h
     return {
         "input": raw.get("input_tokens", 0) or 0,
         "cache_write": cw,
@@ -99,13 +109,16 @@ def _project_name(path):
 
 
 def load_requests(logs_dir=None):
-    """Parse every transcript into one record per API request, plus tool stats."""
+    """Parse every transcript into one record per API request.
+
+    Each record lists the tools it called; tool results are attached to the
+    request that made the call so they filter by date and project with it.
+    """
     base = Path(logs_dir) if logs_dir else LOGS_DIR
     requests = {}
-    tool_calls = {}  # tool_use_id -> tool name
-    tool_stats = defaultdict(lambda: {"calls": 0, "result_chars": 0, "errors": 0})
+    tool_calls = {}  # tool_use_id -> (tool name, request record)
     if not base.exists():
-        return [], {}
+        return []
 
     for path in sorted(base.rglob("*.jsonl")):
         project = _project_name(path) if base == LOGS_DIR else path.parent.name
@@ -137,23 +150,24 @@ def load_requests(logs_dir=None):
                     "timestamp": entry.get("timestamp"),
                     "model": model,
                     "tools": [],
+                    "tool_results": [],  # (tool name, chars, is_error)
                 })
                 rec["usage"] = _usage(msg["usage"])
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_use":
                         name = block.get("name", "?")
                         if block.get("id") not in tool_calls:
-                            tool_calls[block.get("id")] = name
-                            tool_stats[name]["calls"] += 1
+                            tool_calls[block.get("id")] = (name, rec)
                             rec["tools"].append(name)
 
             elif entry.get("type") == "user":
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
-                        name = tool_calls.get(block.get("tool_use_id"), "?")
-                        tool_stats[name]["result_chars"] += _text_len(block.get("content"))
-                        if block.get("is_error"):
-                            tool_stats[name]["errors"] += 1
+                        call = tool_calls.get(block.get("tool_use_id"))
+                        if call:
+                            name, owner = call
+                            owner["tool_results"].append(
+                                (name, _text_len(block.get("content")), bool(block.get("is_error"))))
 
     out = []
     for rec in requests.values():
@@ -165,7 +179,7 @@ def load_requests(logs_dir=None):
         rec["total"] = rec["context"] + u["output"]
         out.append(rec)
     out.sort(key=lambda r: r["timestamp"] or "")
-    return out, dict(tool_stats)
+    return out
 
 
 def _blank():
@@ -200,11 +214,131 @@ def _fmt(n):
     return str(int(n))
 
 
-def analyze(logs_dir=None, days=None):
-    reqs, tool_stats = load_requests(logs_dir)
+def _ts(r):
+    dt = _local(r["timestamp"])
+    return dt.timestamp() if dt else 0.0
+
+
+def load_limits():
+    try:
+        saved = json.loads(LIMITS_FILE.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    out = json.loads(json.dumps(DEFAULT_LIMITS))
+    out["count_cache_reads"] = bool(saved.get("count_cache_reads", out["count_cache_reads"]))
+    for w in WINDOWS:
+        for k in ("tokens", "cost"):
+            v = (saved.get("limits") or {}).get(w, {}).get(k)
+            out["limits"][w][k] = float(v) if isinstance(v, (int, float)) and v > 0 else None
+    return out
+
+
+def save_limits(data):
+    clean = {"count_cache_reads": bool(data.get("count_cache_reads")), "limits": {}}
+    for w in WINDOWS:
+        clean["limits"][w] = {}
+        for k in ("tokens", "cost"):
+            try:
+                v = float((data.get("limits") or {}).get(w, {}).get(k) or 0)
+            except (TypeError, ValueError):
+                v = 0
+            clean["limits"][w][k] = v if v > 0 else None
+    LIMITS_FILE.write_text(json.dumps(clean, indent=2))
+    return load_limits()
+
+
+def limit_tokens(r, count_cache_reads):
+    return r["total"] if count_cache_reads else r["total"] - r["usage"]["cache_read"]
+
+
+def _window_start(window, now):
+    if window == "5h":
+        return now - timedelta(hours=5)
+    if window == "7d":
+        return now - timedelta(days=7)
+    local = now.astimezone()
+    return local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _limit_status(reqs, cfg):
+    now = datetime.now(timezone.utc)
+    out = []
+    for w, label in WINDOWS.items():
+        start = _window_start(w, now).timestamp()
+        inside = [r for r in reqs if _ts(r) >= start]
+        tokens = sum(limit_tokens(r, cfg["count_cache_reads"]) for r in inside)
+        cost = sum(r["cost"] or 0 for r in inside)
+        lim = cfg["limits"][w]
+        if w == "month":
+            local = now.astimezone()
+            nxt = (local.replace(day=28) + timedelta(days=4)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            resets = nxt.isoformat()
+        else:
+            # Rolling window: usage frees up as the oldest request ages out.
+            span = timedelta(hours=5) if w == "5h" else timedelta(days=7)
+            resets = (_local(inside[0]["timestamp"]) + span).isoformat() if inside else None
+        out.append({
+            "window": w, "label": label, "requests": len(inside),
+            "tokens": tokens, "cost": cost,
+            "token_limit": lim["tokens"], "cost_limit": lim["cost"],
+            "tokens_left": None if lim["tokens"] is None else max(0, lim["tokens"] - tokens),
+            "cost_left": None if lim["cost"] is None else max(0.0, lim["cost"] - cost),
+            "resets": resets,
+        })
+    return out
+
+
+def _projects_overview(reqs):
+    rows = {}
+    total_cost = sum(r["cost"] or 0 for r in reqs) or 0
+    for r in reqs:
+        p = rows.setdefault(r["project"], {**_blank(), "project": r["project"], "sessions": set(),
+                                           "models": defaultdict(float), "tool_calls": defaultdict(int),
+                                           "first": r["timestamp"], "last": r["timestamp"], "max_context": 0})
+        _add(p, r)
+        p["sessions"].add(r["session"])
+        p["models"][r["model"]] += r["cost"] or 0
+        for t in r["tools"]:
+            p["tool_calls"][t] += 1
+        p["last"] = r["timestamp"] or p["last"]
+        p["max_context"] = max(p["max_context"], r["context"])
+    out = []
+    for p in rows.values():
+        prompt = p["input"] + p["cache_write"] + p["cache_read"]
+        n = len(p.pop("sessions"))
+        models, tools = p.pop("models"), p.pop("tool_calls")
+        out.append({**p, "sessions": n,
+                    "share": _pct(p["cost"], total_cost),
+                    "cache_hit_rate": _pct(p["cache_read"], prompt),
+                    "avg_context": prompt / p["requests"] if p["requests"] else 0,
+                    "cost_per_session": p["cost"] / n if n else 0,
+                    "top_model": max(models, key=models.get) if models else None,
+                    "top_tool": max(tools, key=tools.get) if tools else None})
+    out.sort(key=lambda x: x["cost"], reverse=True)
+    return out
+
+
+def analyze(logs_dir=None, days=None, project=None):
+    all_reqs = load_requests(logs_dir)
+    cfg = load_limits()
+
+    lifetime = _blank()
+    for r in all_reqs:
+        _add(lifetime, r)
+    lifetime.update({
+        "limit_tokens": sum(limit_tokens(r, cfg["count_cache_reads"]) for r in all_reqs),
+        "sessions": len({r["session"] for r in all_reqs}),
+        "projects": len({r["project"] for r in all_reqs}),
+        "first": all_reqs[0]["timestamp"] if all_reqs else None,
+    })
+
+    reqs = all_reqs
     if days:
         cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
-        reqs = [r for r in reqs if (_local(r["timestamp"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp() >= cutoff]
+        reqs = [r for r in reqs if _ts(r) >= cutoff]
+    projects = _projects_overview(reqs)
+    if project:
+        reqs = [r for r in reqs if r["project"] == project]
 
     totals = _blank()
     by_day, by_hour = defaultdict(_blank), defaultdict(_blank)
@@ -247,6 +381,13 @@ def analyze(logs_dir=None, days=None):
         sessions.append({"session": sid, **b, **m})
     sessions.sort(key=lambda s: s["cost"], reverse=True)
 
+    tool_stats = defaultdict(lambda: {"calls": 0, "result_chars": 0, "errors": 0})
+    for r in reqs:
+        for name in r["tools"]:
+            tool_stats[name]["calls"] += 1
+        for name, chars, err in r["tool_results"]:
+            tool_stats[name]["result_chars"] += chars
+            tool_stats[name]["errors"] += err
     tools = []
     for name, s in tool_stats.items():
         est = s["result_chars"] // CHARS_PER_TOKEN
@@ -278,22 +419,40 @@ def analyze(logs_dir=None, days=None):
         "cost_by_type": cost_parts,
     }
 
+    limit_windows = _limit_status(all_reqs, cfg)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "logs_dir": str(Path(logs_dir) if logs_dir else LOGS_DIR),
+        "project": project,
         "summary": summary,
+        "lifetime": lifetime,
+        "limits": {"count_cache_reads": cfg["count_cache_reads"], "windows": limit_windows},
+        "projects": projects,
         "by_day": [{"day": d, **b} for d, b in sorted(by_day.items())],
         "by_hour": [{"hour": h, **by_hour.get(h, _blank())} for h in range(24)],
         "by_model": sorted(({"model": k, **v} for k, v in by_model.items()), key=lambda x: x["cost"], reverse=True),
-        "by_project": sorted(({"project": k, **v} for k, v in by_project.items()), key=lambda x: x["cost"], reverse=True),
         "sessions": sessions[:50],
         "tools": tools,
         "top_requests": [{
             "timestamp": r["timestamp"], "session": r["session"], "model": r["model"],
             "context": r["context"], "output": r["usage"]["output"], "cost": r["cost"],
             "tools": r["tools"], "subagent": r["subagent"]} for r in top],
-        "insights": _insights(summary, sessions, tools, by_day, by_model),
+        "insights": _limit_insights(limit_windows) + _insights(summary, sessions, tools, by_day, by_model),
     }
+
+
+def _limit_insights(windows):
+    out = []
+    for w in windows:
+        for used, limit, unit in ((w["tokens"], w["token_limit"], "token"), (w["cost"], w["cost_limit"], "cost")):
+            if not limit:
+                continue
+            p = _pct(used, limit)
+            if p >= 75:
+                shown = f"${used:.2f} of ${limit:.2f}" if unit == "cost" else f"{_fmt(used)} of {_fmt(limit)} tokens"
+                out.append({"level": "critical" if p >= 90 else "warning",
+                            "text": f"{w['label']}: {p:.0f}% of your {unit} limit used ({shown})."})
+    return out
 
 
 def _cost_by_type(reqs):
