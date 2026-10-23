@@ -1,0 +1,100 @@
+# 💰 Money Tracker
+
+A personal money tracker: accounts, income & expenses, transfers between your
+own accounts, monthly budgets, and reports — all in Indian Rupees (₹).
+
+- **Frontend:** plain HTML/CSS/JS served by a small Flask app.
+- **Backend:** [Supabase](https://supabase.com) for the database **and** sign-in.
+- **Security:** the browser talks to Supabase directly. Every table has Row
+  Level Security, so each signed-in user can only ever read and write their own
+  rows — enforced by the database, not just the app. The Flask server never
+  holds your database password or sees your data.
+
+---
+
+## What's in here
+
+```
+app.py                     Flask app (serves the pages)
+templates/                 the pages (dashboard, transactions, accounts, budgets, reports, login)
+static/                    CSS and JavaScript
+supabase/migrations/       the SQL to set up your database (run in order)
+tests/                     a SQL test of the schema, security rules and money logic
+```
+
+---
+
+## 1. Set up Supabase (one time)
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Open **SQL Editor** and run each file in `supabase/migrations/` **in order**:
+   `0001_schema.sql`, `0002_rls.sql`, `0003_functions.sql`, `0004_seed_trigger.sql`.
+   (Paste the contents of each, run, then the next.)
+3. Create your own account: **Authentication → Users → Add user** (set an email
+   and password). The seed trigger gives you starter categories and a Cash
+   account automatically.
+4. Lock it down so nobody else can register: **Authentication → Providers →
+   Email**, turn **off** "Enable sign-ups". (You can leave "Confirm email" off
+   for a personal app.)
+5. Get your keys from **Settings → API**: the **Project URL** and the
+   **anon public** key. The anon key is meant to be used in browsers and is
+   safe to expose. **Never** use the `service_role` key or the database
+   password in this app.
+
+---
+
+## 2. Run it on your computer
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # then fill in your URL and anon key
+python app.py                 # open http://localhost:5000
+```
+
+---
+
+## 3. Deploy to Render
+
+1. Push this repo to GitHub and create a **Web Service** from it on Render.
+2. Build command: `pip install -r requirements.txt` — Start command comes from
+   the `Procfile` (`gunicorn app:app`).
+3. Add two environment variables on the Render service:
+   - `SUPABASE_URL` — your project URL
+   - `SUPABASE_ANON_KEY` — your anon public key
+4. Deploy, open the URL, and sign in with the account you created.
+
+---
+
+## Features
+
+- **Dashboard** — total balance across accounts, this month's income and
+  spending, budget progress, and recent transactions.
+- **Transactions** — add income, expenses, or transfers between your accounts;
+  filter by month and account; delete. Transfers don't count as spending.
+- **Accounts** — cash, bank, card or wallet, each with an opening balance and a
+  live balance.
+- **Budgets** — a monthly limit per category that repeats each month, with
+  progress bars that turn red when you go over.
+- **Reports** — spending by category (doughnut chart) and income vs. expenses
+  over the last 12 months (bar chart), plus **Export CSV** to download all your
+  transactions.
+
+---
+
+## Running the tests
+
+The tests check the schema, the security rules (one user cannot see another's
+data), and the money math (balances, transfers, budgets) against a local
+PostgreSQL. With `psql` and a local Postgres available:
+
+```bash
+bash tests/run.sh
+```
+
+---
+
+## A note on your data
+
+Render's free PostgreSQL and Supabase's free tier have their own limits and
+retention policies. Use **Reports → Export CSV** now and then to keep your own
+backup of your transactions.
