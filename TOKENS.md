@@ -34,3 +34,11 @@ python run_dashboard.py           # opens http://127.0.0.1:5000/tokens
 ```
 
 Or the plain Flask way: `python MyAPP.py`, then open http://127.0.0.1:5000/tokens.
+
+## Static version for GitHub Pages (docs/index.html)
+
+`docs/index.html` is a self-contained, server-free build of the same dashboard.
+Open it in a browser and drop your `~/.claude/projects` folder (or `.jsonl`
+files) onto it — parsing happens entirely in your browser, nothing is uploaded.
+See `docs/README.md` for hosting it on GitHub Pages. Same charts, limits,
+lifetime totals, and per-project deep dive as the Flask app.

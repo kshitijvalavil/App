@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Token Usage</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --accent: #4f46e5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --accent: #8b85f0;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --accent: #8b85f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--page); color: var(--ink); padding: 24px 16px 48px; }
+  main { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 1.5rem; }
+  h2 { font-size: 1rem; margin-bottom: 12px; }
+  .sub { color: var(--ink-2); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 14px; }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--ring); background: var(--surface); color: var(--ink); }
+  button.primary { background: var(--accent); color: #fff; border: none; font-weight: 600; cursor: pointer; }
+  button.primary[disabled] { opacity: .6; cursor: progress; }
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; min-width: 0; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .tile .label { color: var(--ink-2); font-size: 13px; }
+  .tile .value { font-size: 1.6rem; font-weight: 650; margin-top: 4px; }
+  .tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .two { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .two { grid-template-columns: 1fr; } }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--ink-2); margin-bottom: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bar:hover, .hbar:hover { opacity: .8; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); display: none; z-index: 10; font-variant-numeric: tabular-nums; }
+  #tip b { display: block; margin-bottom: 4px; }
+  #tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  ul.insights { list-style: none; display: grid; gap: 10px; }
+  ul.insights li { display: flex; gap: 10px; font-size: 14px; line-height: 1.45; }
+  .badge { flex: none; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 8px; height: fit-content; border: 1px solid currentColor; }
+  .badge.good { color: var(--good); } .badge.warning { color: var(--warning); } .badge.critical { color: var(--critical); } .badge.info { color: var(--muted); }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  th { color: var(--ink-2); font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  td.mono { font-family: ui-monospace, monospace; }
+  .empty { color: var(--ink-2); padding: 24px 0; text-align: center; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card-head h2 { margin: 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .limit h3 { font-size: 14px; margin-bottom: 8px; }
+  .meter { margin-bottom: 10px; font-size: 13px; }
+  .meter .row { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-2); margin-bottom: 4px; }
+  .meter .row b { color: var(--ink); font-weight: 650; }
+  .track { height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+  .fill { height: 100%; border-radius: 4px; background: var(--s1); }
+  .fill.warning { background: var(--warning); } .fill.critical { background: var(--critical); }
+  .meter .left { margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .meter .left.warning { color: var(--ink); } .meter .left.critical { color: var(--critical); font-weight: 600; }
+  .unset { color: var(--muted); font-size: 13px; }
+  form.limits-form { display: none; margin-top: 16px; border-top: 1px solid var(--grid); padding-top: 16px; gap: 12px; }
+  form.limits-form.open { display: grid; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .form-grid fieldset { border: 1px solid var(--ring); border-radius: 8px; padding: 10px; display: grid; gap: 8px; font-size: 13px; }
+  .form-grid legend { font-weight: 600; padding: 0 4px; }
+  .form-grid label { display: grid; gap: 4px; color: var(--ink-2); }
+  input[type=number] { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--ring); background: var(--page); color: var(--ink); width: 100%; }
+  .lifetime { display: flex; flex-wrap: wrap; gap: 8px 32px; }
+  .lifetime div { font-size: 13px; color: var(--ink-2); }
+  .lifetime b { display: block; font-size: 1.25rem; color: var(--ink); font-weight: 650; }
+  .scope { display: none; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--accent); }
+  .scope.on { display: flex; }
+  tr.clickable { cursor: pointer; } tr.clickable:hover td { background: var(--grid); }
+  tr.selected td { font-weight: 650; }
+  button.link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 600; }
+  .err { color: var(--critical); }
+
+  .drop { border: 2px dashed var(--axis); background: transparent; text-align: center; }
+  .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .drop.loaded { padding: 10px 16px; }
+  .drop.loaded .drop-inner p { display: none; }
+  .drop-inner b { font-size: 1.05rem; }
+  .drop-inner p { margin: 8px auto 6px; max-width: 560px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Claude token usage</h1>
+      <div class="sub" id="meta">Everything runs in your browser — your logs never leave this page.</div>
+    </div>
+    <div class="controls">
+      <label>Range
+        <select id="days">
+          <option value="">All time</option><option value="1">Last 24h</option>
+          <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option>
+        </select>
+      </label>
+      <label>Project
+        <select id="project"><option value="">All projects</option></select>
+      </label>
+      <button class="primary" id="pickFolder" type="button">Load folder</button>
+      <button id="pickFiles" type="button">Pick files</button>
+    </div>
+  </header>
+
+  <section class="card drop" id="drop">
+    <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+    <input type="file" id="filesInput" accept=".jsonl" multiple hidden>
+    <div class="drop-inner">
+      <b>Drop your Claude logs here</b>
+      <p class="hint">Drag the <code>~/.claude/projects</code> folder (or any <code>.jsonl</code> files) onto this box, or use the buttons above. Nothing is uploaded — parsing happens locally in your browser.</p>
+      <div id="dropMsg" class="hint"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Limits &amp; what's left</h2>
+      <button class="link" id="editLimits" type="button">Edit limits</button>
+    </div>
+    <div class="limits" id="limits"></div>
+    <form class="limits-form" id="limitsForm">
+      <div class="form-grid" id="limitsFields"></div>
+      <label class="hint"><input type="checkbox" id="countCacheReads"> Count cache reads toward token limits (they are ~95% of raw tokens but bill at a fraction of input)</label>
+      <div><button class="primary" type="submit">Save limits</button> <button type="button" id="cancelLimits">Cancel</button> <span class="hint">Leave blank for no limit.</span></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Lifetime</h2><span class="hint" id="lifetimeSince"></span></div>
+    <div class="lifetime" id="lifetime"></div>
+  </section>
+
+  <section class="card scope" id="scope">
+    <div><b id="scopeName"></b><div class="hint">Project deep dive: everything below is filtered to this project.</div></div>
+    <button type="button" id="clearProject">&larr; All projects</button>
+  </section>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="card">
+    <h2>Insights</h2>
+    <ul class="insights" id="insights"></ul>
+  </section>
+
+  <section class="two">
+    <div class="card">
+      <h2>Tokens per day</h2>
+      <div class="legend" id="dayLegend"></div>
+      <div id="dayChart"></div>
+    </div>
+    <div class="card">
+      <h2>Estimated cost by token type</h2>
+      <div id="costChart"></div>
+    </div>
+  </section>
+
+  <section class="two">
+    <div class="card">
+      <h2>Requests by hour of day</h2>
+      <div id="hourChart"></div>
+    </div>
+    <div class="card">
+      <h2>Cost by model</h2>
+      <div id="modelChart"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Usage by project</h2><span class="hint">Click a project to deep dive</span></div>
+    <div id="projectShare"></div>
+    <div class="table-wrap" id="projects"></div>
+  </section>
+  <section class="card"><h2>Sessions (most expensive first)</h2><div class="table-wrap" id="sessions"></div></section>
+  <section class="card"><h2>Tools (by text returned into context)</h2><div class="table-wrap" id="tools"></div></section>
+  <section class="card"><h2>Most expensive requests</h2><div class="table-wrap" id="top"></div></section>
+</main>
+<div id="tip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const SERIES = [
+  ["input", "Input", "--s1"], ["cache_write", "Cache write", "--s2"],
+  ["cache_read", "Cache read", "--s3"], ["output", "Output", "--s4"],
+];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = n => {
+  n = Number(n) || 0;
+  for (const [u, s] of [["B", 1e9], ["M", 1e6], ["K", 1e3]]) if (Math.abs(n) >= s) return (n / s).toFixed(1) + u;
+  return Math.round(n).toString();
+};
+const usd = n => n == null ? "—" : "$" + (n < 1 ? n.toFixed(3) : n.toFixed(2));
+const pct = n => n.toFixed(1) + "%";
+const when = ts => ts ? new Date(ts).toLocaleString() : "—";
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+const tip = $("tip");
+function showTip(e, html) {
+  tip.innerHTML = html; tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8);
+  const y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+document.addEventListener("mouseout", e => { if (e.target.dataset && e.target.dataset.tip !== undefined) tip.style.display = "none"; });
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (t) showTip(e, t.dataset.tip); else tip.style.display = "none";
+});
+
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+
+// Rounded-top rect anchored to its baseline.
+function bar(x, y, w, h, r, fill, tipHtml, top = true) {
+  r = Math.min(r, w / 2, h);
+  const d = top
+    ? `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`
+    : `M${x},${y}H${x + w}V${y + h}H${x}Z`;
+  return `<path class="bar" d="${d}" fill="${fill}" data-tip="${esc(tipHtml)}"/>`;
+}
+
+function stackedDays(days) {
+  $("dayLegend").innerHTML = SERIES.map(([, l, c]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("");
+  if (!days.length) { $("dayChart").innerHTML = '<div class="empty">No data in range</div>'; return; }
+  const W = 720, H = 260, L = 48, B = 24, T = 8, gap = 2;
+  const max = niceMax(Math.max(...days.map(d => SERIES.reduce((a, [k]) => a + d[k], 0))));
+  const bw = Math.max(2, Math.min(40, (W - L) / days.length - 4));
+  const step = (W - L) / days.length;
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = T + (H - T - B) * (1 - i / 4);
+    g += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(${i ? "--grid" : "--axis"})"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${fmt(max * i / 4)}</text>`;
+  }
+  const every = Math.ceil(days.length / 8);
+  days.forEach((d, i) => {
+    const x = L + i * step + (step - bw) / 2;
+    let y0 = H - B;
+    const tipHtml = `<b>${d.day}</b>` + SERIES.map(([k, l, c]) => `<div><i style="background:var(${c})"></i>${l}: ${fmt(d[k])}</div>`).join("")
+      + `<div>Requests: ${d.requests}</div><div>Cost: ${usd(d.cost)}</div>`;
+    const segs = SERIES.filter(([k]) => d[k] > 0);
+    segs.forEach(([k, , c], j) => {
+      const h = (H - T - B) * d[k] / max;
+      const isTop = j === segs.length - 1;
+      const hh = Math.max(0, h - (isTop ? 0 : gap));
+      g += bar(x, y0 - h + (isTop ? 0 : gap), bw, hh, 4, `var(${c})`, tipHtml, isTop);
+      y0 -= h;
+    });
+    if (i % every === 0) g += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${d.day.slice(5)}</text>`;
+  });
+  $("dayChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Stacked tokens per day">${g}</svg>`;
+}
+
+function hbars(el, rows, color, W = 360) {
+  if (!rows.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const rowH = 34, L = 0;
+  const max = Math.max(...rows.map(r => r.value)) || 1;
+  let g = "";
+  rows.forEach((r, i) => {
+    const y = i * rowH, w = Math.max(2, (W - 130) * r.value / max);
+    g += `<text x="0" y="${y + 11}" style="fill:var(--ink-2);font-size:12px">${esc(r.label)}</text>`;
+    g += `<rect class="hbar" x="${L}" y="${y + 16}" width="${w}" height="12" rx="4" fill="var(${r.color || color})" data-tip="${esc(r.tip)}"/>`;
+    g += `<text x="${w + 6}" y="${y + 26}" style="fill:var(--ink);font-size:12px">${esc(r.text)}</text>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${rows.length * rowH}" role="img">${g}</svg>`;
+}
+
+function hours(rows) {
+  const W = 720, H = 180, L = 36, B = 22, T = 8;
+  const max = niceMax(Math.max(...rows.map(r => r.requests), 1));
+  const step = (W - L) / 24, bw = step - 4;
+  let g = "";
+  for (let i = 0; i <= 2; i++) {
+    const y = T + (H - T - B) * (1 - i / 2);
+    g += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(${i ? "--grid" : "--axis"})"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${fmt(max * i / 2)}</text>`;
+  }
+  rows.forEach((r, i) => {
+    const h = (H - T - B) * r.requests / max, x = L + i * step + 2;
+    if (h > 0) g += bar(x, H - B - h, bw, h, 4, "var(--s1)", `<b>${String(r.hour).padStart(2, "0")}:00</b><div>Requests: ${r.requests}</div><div>Tokens: ${fmt(r.total)}</div><div>Cost: ${usd(r.cost)}</div>`);
+    if (i % 3 === 0) g += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${String(r.hour).padStart(2, "0")}</text>`;
+  });
+  $("hourChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Requests by hour, local time">${g}</svg>`;
+}
+
+function table(el, cols, rows, rowAttrs = () => "") {
+  if (!rows.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  el.innerHTML = `<table><thead><tr>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>`
+    + rows.map(r => `<tr ${rowAttrs(r)}>${cols.map(c => `<td class="${c[2] || ""}">${c[1](r)}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
+}
+
+const level = p => p >= 90 ? "critical" : p >= 75 ? "warning" : "";
+const until = ts => {
+  if (!ts) return "";
+  const ms = new Date(ts) - Date.now();
+  if (ms <= 0) return "now";
+  const h = Math.floor(ms / 3.6e6), m = Math.round((ms % 3.6e6) / 6e4);
+  return h >= 48 ? `in ${Math.round(h / 24)} days` : h ? `in ${h}h ${m}m` : `in ${m}m`;
+};
+function meter(name, used, limit, left, show) {
+  const p = Math.min(100, 100 * used / limit), lv = level(p);
+  return `<div class="meter"><div class="row"><span>${name}</span><span><b>${show(used)}</b> / ${show(limit)}</span></div>
+    <div class="track" role="progressbar" aria-valuenow="${p.toFixed(0)}" aria-valuemin="0" aria-valuemax="100"><div class="fill ${lv}" style="width:${p}%"></div></div>
+    <div class="left ${lv}">${lv === "critical" ? "✕ " : lv === "warning" ? "! " : ""}${show(left)} left · ${p.toFixed(0)}% used</div></div>`;
+}
+
+let limitsCfg = null;
+function renderLimits(lim) {
+  $("limits").innerHTML = lim.windows.map(w => {
+    const parts = [];
+    if (w.token_limit) parts.push(meter("Tokens", w.tokens, w.token_limit, w.tokens_left, fmt));
+    if (w.cost_limit) parts.push(meter("Cost", w.cost, w.cost_limit, w.cost_left, usd));
+    if (!parts.length) parts.push(`<div class="unset">No limit set · used ${fmt(w.tokens)} tokens, ${usd(w.cost)}</div>`);
+    const reset = w.requests ? `<div class="hint">${w.window === "month" ? "Resets" : "Oldest usage rolls off"} ${until(w.resets)}</div>` : "";
+    return `<div class="limit"><h3>${w.label}</h3>${parts.join("")}${reset}</div>`;
+  }).join("");
+}
+function openLimitsForm() {
+  const c = limitsCfg, labels = {"5h": "Last 5 hours", "7d": "Last 7 days", "month": "This month"};
+  $("limitsFields").innerHTML = Object.keys(labels).map(w => `<fieldset><legend>${labels[w]}</legend>
+    <label>Token limit<input type="number" min="0" step="1000" name="${w}.tokens" value="${c.limits[w].tokens ?? ""}" placeholder="e.g. 2000000"></label>
+    <label>Cost limit ($)<input type="number" min="0" step="0.01" name="${w}.cost" value="${c.limits[w].cost ?? ""}" placeholder="e.g. 50"></label></fieldset>`).join("");
+  $("countCacheReads").checked = c.count_cache_reads;
+  $("limitsForm").classList.add("open");
+}
+
+function setProject(p) {
+  $("project").value = p;
+  schedule();
+  load();
+  scrollTo({top: 0, behavior: "smooth"});
+}
+
+function render(d) {
+  const s = d.summary;
+  $("meta").innerHTML = `Reading <code>${esc(d.logs_dir)}</code> · ${s.requests} requests · ${when(s.first)} → ${when(s.last)} · updated ${new Date(d.generated_at).toLocaleTimeString()}`;
+  const tiles = [
+    ["Total tokens", fmt(s.total), `${fmt(s.prompt)} prompt · ${fmt(s.output)} output`],
+    ["Estimated cost", usd(s.cost), `vs ${usd(s.uncached_cost)} without caching`],
+    ["Cache hit rate", pct(s.cache_hit_rate), `${fmt(s.cache_read)} tokens read from cache`],
+    ["Requests", s.requests.toLocaleString(), `${s.sessions} session${s.sessions === 1 ? "" : "s"} · ${s.projects} project${s.projects === 1 ? "" : "s"}`],
+    ["Avg context / request", fmt(s.avg_context), `max ${fmt(s.max_context)}`],
+    ["Avg output / request", fmt(s.avg_output), `${fmt(s.thinking)} thinking tokens total`],
+  ];
+  $("tiles").innerHTML = tiles.map(([l, v, n]) => `<div class="card tile"><div class="label">${l}</div><div class="value">${v}</div><div class="note">${n}</div></div>`).join("");
+  $("insights").innerHTML = d.insights.map(i => {
+    const icon = {good: "✓ Good", warning: "! Watch", critical: "✕ Fix", info: "i Note"}[i.level];
+    return `<li><span class="badge ${i.level}">${icon}</span><span>${esc(i.text)}</span></li>`;
+  }).join("");
+
+  stackedDays(d.by_day);
+  const cbt = s.cost_by_type, ctot = Object.values(cbt).reduce((a, b) => a + b, 0) || 1;
+  hbars($("costChart"), SERIES.map(([k, l, c]) => ({label: l, color: c, value: cbt[k], text: `${usd(cbt[k])} · ${pct(100 * cbt[k] / ctot)}`, tip: `<b>${l}</b>${fmt(s[k])} tokens<br>${usd(cbt[k])}`})), "--s2");
+  hours(d.by_hour);
+  hbars($("modelChart"), d.by_model.map(m => ({label: m.model, value: m.cost, text: `${usd(m.cost)} · ${m.requests} req`, tip: `<b>${esc(m.model)}</b>${fmt(m.total)} tokens<br>${m.requests} requests<br>${usd(m.cost)}`})), "--s1");
+
+  const tok = [["Input", r => fmt(r.input)], ["Cache write", r => fmt(r.cache_write)], ["Cache read", r => fmt(r.cache_read)], ["Output", r => fmt(r.output)]];
+  table($("sessions"), [["Session", r => esc(r.session.slice(0, 8)), "mono"], ["Project", r => esc(r.project)], ["Started", r => when(r.start)], ["Requests", r => r.requests],
+    ...tok, ["Peak context", r => fmt(r.max_context)], ["Cost", r => usd(r.cost)]], d.sessions);
+  table($("tools"), [["Tool", r => esc(r.tool), "mono"], ["Calls", r => r.calls], ["Errors", r => r.errors], ["Est. tokens returned", r => fmt(r.result_tokens_est)], ["Avg / call", r => fmt(r.avg_result_tokens)]], d.tools);
+  table($("top"), [["Time", r => when(r.timestamp)], ["Session", r => esc(r.session.slice(0, 8)), "mono"], ["Model", r => esc(r.model)], ["Context", r => fmt(r.context)],
+    ["Output", r => fmt(r.output)], ["Tools", r => esc([...new Set(r.tools)].join(", ") || "—")], ["Cost", r => usd(r.cost)]], d.top_requests);
+  const sel = d.project || "";
+  hbars($("projectShare"), d.projects.slice(0, 8).map(p => ({label: p.project, value: p.cost, color: p.project === sel ? "--s2" : "--s1",
+    text: `${usd(p.cost)} · ${pct(p.share)}`, tip: `<b>${esc(p.project)}</b>${fmt(p.total)} tokens<br>${p.sessions} sessions · ${p.requests} requests<br>${usd(p.cost)} (${pct(p.share)} of spend)`})), "--s1", 1100);
+  table($("projects"), [["Project", r => esc(r.project)], ["Sessions", r => r.sessions], ["Requests", r => r.requests],
+    ["Tokens", r => fmt(r.total)], ["Output", r => fmt(r.output)], ["Cache hit", r => pct(r.cache_hit_rate)], ["Avg context", r => fmt(r.avg_context)],
+    ["Peak context", r => fmt(r.max_context)], ["Top model", r => esc(r.top_model || "—")], ["Top tool", r => esc(r.top_tool || "—")],
+    ["Last active", r => when(r.last)], ["$/session", r => usd(r.cost_per_session)], ["Cost", r => usd(r.cost)], ["Share", r => pct(r.share)]],
+    d.projects, r => `class="clickable${r.project === sel ? " selected" : ""}" data-project="${esc(r.project)}"`);
+  $("projects").querySelectorAll("tr[data-project]").forEach(tr => tr.onclick = () => setProject(tr.dataset.project === sel ? "" : tr.dataset.project));
+
+  const ps = $("project"), keep = ps.value;
+  ps.innerHTML = '<option value="">All projects</option>' + d.projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
+  if (sel && !d.projects.some(p => p.project === sel)) ps.innerHTML += `<option value="${esc(sel)}">${esc(sel)}</option>`;
+  ps.value = keep;
+  $("scope").classList.toggle("on", !!sel);
+  $("scopeName").textContent = sel;
+
+  renderLimits(d.limits);
+  const L = d.lifetime;
+  $("lifetimeSince").textContent = L.first ? "since " + new Date(L.first).toLocaleDateString() : "";
+  $("lifetime").innerHTML = [
+    ["Total tokens", fmt(L.total)], [d.limits.count_cache_reads ? "Counted toward limits" : "Counted toward limits (excl. cache reads)", fmt(L.limit_tokens)],
+    ["Output tokens", fmt(L.output)], ["Estimated cost", usd(L.cost)], ["Requests", L.requests.toLocaleString()],
+    ["Sessions", L.sessions], ["Projects", L.projects],
+  ].map(([l, v]) => `<div>${l}<b>${v}</b></div>`).join("");
+}
+
+
+
+// ===== In-browser analysis engine (port of token_usage.py) =====
+const PRICING = {
+  "claude-fable-5-1": [10,50,0.25], "claude-mythos-5-1": [10,50,0.25],
+  "claude-fable-5": [10,50,1], "claude-mythos-5": [10,50,1],
+  "claude-opus-5-5": [4,20,0.20], "claude-opus-5": [5,25,0.50], "claude-opus-4": [5,25,0.50],
+  "claude-sonnet-5-5": [2,10,0.20], "claude-sonnet-5": [2,10,0.20], "claude-sonnet-4": [3,15,0.30],
+  "claude-haiku-5-5": [0.10,0.50,0.01], "claude-haiku-4": [1,5,0.10],
+};
+const HAIKU_55_LONG = [0.50, 2.50, 0.05];
+const CACHE_WRITE_5M = 1.25, CACHE_WRITE_1H = 2, LARGE_CONTEXT = 200000, CHARS_PER_TOKEN = 4;
+const PRICE_KEYS = Object.keys(PRICING).sort((a, b) => b.length - a.length);
+const WINDOWS = {"5h": "Last 5 hours", "7d": "Last 7 days", "month": "This month"};
+
+function priceFor(model, prompt) {
+  for (const k of PRICE_KEYS) if (model.startsWith(k)) {
+    if (k === "claude-haiku-5-5" && prompt > 100000) return HAIKU_55_LONG;
+    return PRICING[k];
+  }
+  return null;
+}
+function requestCost(model, u) {
+  const prompt = u.input + u.cache_write + u.cache_read;
+  const p = priceFor(model, prompt);
+  if (!p) return [null, null];
+  const inp = p[0] / 1e6, out = p[1] / 1e6, read = p[2] / 1e6;
+  const cost = u.input * inp + u.cache_write_5m * inp * CACHE_WRITE_5M + u.cache_write_1h * inp * CACHE_WRITE_1H
+    + u.cache_read * read + u.output * out;
+  return [cost, prompt * inp + u.output * out];
+}
+function usageOf(raw) {
+  const cw = raw.cache_creation_input_tokens || 0;
+  const split = raw.cache_creation || {};
+  const cw1h = Math.min(cw, split.ephemeral_1h_input_tokens || 0);
+  return {
+    input: raw.input_tokens || 0, cache_write: cw, cache_write_1h: cw1h, cache_write_5m: cw - cw1h,
+    cache_read: raw.cache_read_input_tokens || 0, output: raw.output_tokens || 0,
+    thinking: (raw.output_tokens_details || {}).thinking_tokens || 0,
+    web_search: (raw.server_tool_use || {}).web_search_requests || 0,
+  };
+}
+function textLen(c) {
+  if (typeof c === "string") return c.length;
+  if (Array.isArray(c)) return c.reduce((a, x) => a + (x && typeof x === "object" ? textLen(x.text || x.content || "") : 0), 0);
+  return 0;
+}
+function decodeProj(name) { return name.replace(/^-+/, "").replace(/-/g, "/"); }
+function projectFromPath(path) {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  if (!parts.length) return "(unknown)";
+  const pi = parts.indexOf("projects");
+  return decodeProj(pi >= 0 && parts[pi + 1] ? parts[pi + 1] : parts[0]);
+}
+function parseFiles(files) {  // files: [{path, text}]
+  const requests = {}, toolCalls = {};
+  for (const f of files) {
+    const project = projectFromPath(f.path);
+    const sub = f.path.includes("/subagents/");
+    for (const line of f.text.split("\n")) {
+      if (!line.trim()) continue;
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      const msg = e.message || {};
+      const content = Array.isArray(msg.content) ? msg.content : [];
+      if (e.type === "assistant" && msg.usage) {
+        const model = msg.model || "unknown";
+        if (model === "<synthetic>") continue;
+        const key = msg.id || e.requestId || e.uuid;
+        let rec = requests[key];
+        if (!rec) rec = requests[key] = {id: key, session: e.sessionId || f.path, project,
+          subagent: sub || !!e.isSidechain, timestamp: e.timestamp, model, tools: [], tool_results: []};
+        rec.usage = usageOf(msg.usage);
+        for (const b of content) if (b && b.type === "tool_use" && !(b.id in toolCalls)) {
+          toolCalls[b.id] = [b.name || "?", rec]; rec.tools.push(b.name || "?");
+        }
+      } else if (e.type === "user") {
+        for (const b of content) if (b && b.type === "tool_result") {
+          const call = toolCalls[b.tool_use_id];
+          if (call) call[1].tool_results.push([call[0], textLen(b.content), !!b.is_error]);
+        }
+      }
+    }
+  }
+  const out = [];
+  for (const r of Object.values(requests)) {
+    if (!r.usage) continue;
+    [r.cost, r.uncached_cost] = requestCost(r.model, r.usage);
+    r.context = r.usage.input + r.usage.cache_write + r.usage.cache_read;
+    r.total = r.context + r.usage.output;
+    out.push(r);
+  }
+  out.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || ""));
+  return out;
+}
+
+const blank = () => ({requests: 0, input: 0, cache_write: 0, cache_read: 0, output: 0, thinking: 0, total: 0, cost: 0});
+function addInto(b, r) {
+  const u = r.usage; b.requests++;
+  for (const k of ["input", "cache_write", "cache_read", "output", "thinking"]) b[k] += u[k];
+  b.total += r.total; b.cost += r.cost || 0;
+}
+const tsMs = r => { const d = r.timestamp ? new Date(r.timestamp) : null; return d && !isNaN(d) ? d.getTime() : 0; };
+const pctOf = (p, w) => w ? 100 * p / w : 0;
+function fmtPlain(n) {
+  for (const [u, s] of [["B", 1e9], ["M", 1e6], ["K", 1e3]]) if (Math.abs(n) >= s) return (n / s).toFixed(1) + u;
+  return String(Math.round(n));
+}
+const limitTokens = (r, ccr) => ccr ? r.total : r.total - r.usage.cache_read;
+
+// ---- limits (localStorage) ----
+function loadLimitsCfg() {
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem("tokens.limits") || "{}"); } catch {}
+  const out = {count_cache_reads: !!saved.count_cache_reads, limits: {}};
+  for (const w in WINDOWS) {
+    out.limits[w] = {tokens: null, cost: null};
+    for (const k of ["tokens", "cost"]) {
+      const v = (saved.limits || {})[w]?.[k];
+      out.limits[w][k] = typeof v === "number" && v > 0 ? v : null;
+    }
+  }
+  return out;
+}
+function saveLimitsCfg(data) {
+  const clean = {count_cache_reads: !!data.count_cache_reads, limits: {}};
+  for (const w in WINDOWS) {
+    clean.limits[w] = {};
+    for (const k of ["tokens", "cost"]) { const v = Number((data.limits || {})[w]?.[k] || 0); clean.limits[w][k] = v > 0 ? v : null; }
+  }
+  try { localStorage.setItem("tokens.limits", JSON.stringify(clean)); } catch {}
+  return loadLimitsCfg();
+}
+function windowStart(w, now) {
+  if (w === "5h") return now - 5 * 3.6e6;
+  if (w === "7d") return now - 7 * 86400000;
+  const d = new Date(now); return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+}
+function limitStatus(reqs, cfg) {
+  const now = Date.now(), out = [];
+  for (const w in WINDOWS) {
+    const start = windowStart(w, now);
+    const inside = reqs.filter(r => tsMs(r) >= start);
+    const tokens = inside.reduce((a, r) => a + limitTokens(r, cfg.count_cache_reads), 0);
+    const cost = inside.reduce((a, r) => a + (r.cost || 0), 0);
+    const lim = cfg.limits[w];
+    let resets = null;
+    if (w === "month") { const d = new Date(now); resets = new Date(d.getFullYear(), d.getMonth() + 1, 1).toISOString(); }
+    else if (inside.length) resets = new Date(tsMs(inside[0]) + (w === "5h" ? 5 * 3.6e6 : 7 * 86400000)).toISOString();
+    out.push({window: w, label: WINDOWS[w], requests: inside.length, tokens, cost,
+      token_limit: lim.tokens, cost_limit: lim.cost,
+      tokens_left: lim.tokens == null ? null : Math.max(0, lim.tokens - tokens),
+      cost_left: lim.cost == null ? null : Math.max(0, lim.cost - cost), resets});
+  }
+  return out;
+}
+function limitInsights(windows) {
+  const out = [];
+  for (const w of windows) for (const [used, lim, unit] of [[w.tokens, w.token_limit, "token"], [w.cost, w.cost_limit, "cost"]]) {
+    if (!lim) continue;
+    const p = pctOf(used, lim);
+    if (p >= 75) {
+      const shown = unit === "cost" ? `$${used.toFixed(2)} of $${lim.toFixed(2)}` : `${fmtPlain(used)} of ${fmtPlain(lim)} tokens`;
+      out.push({level: p >= 90 ? "critical" : "warning", text: `${w.label}: ${p.toFixed(0)}% of your ${unit} limit used (${shown}).`});
+    }
+  }
+  return out;
+}
+
+function projectsOverview(reqs) {
+  const rows = {}, totalCost = reqs.reduce((a, r) => a + (r.cost || 0), 0) || 0;
+  for (const r of reqs) {
+    let p = rows[r.project];
+    if (!p) p = rows[r.project] = Object.assign(blank(), {project: r.project, sessions: new Set(),
+      models: {}, tool_calls: {}, first: r.timestamp, last: r.timestamp, max_context: 0});
+    addInto(p, r); p.sessions.add(r.session);
+    p.models[r.model] = (p.models[r.model] || 0) + (r.cost || 0);
+    for (const t of r.tools) p.tool_calls[t] = (p.tool_calls[t] || 0) + 1;
+    p.last = r.timestamp || p.last; p.max_context = Math.max(p.max_context, r.context);
+  }
+  const top = o => Object.keys(o).length ? Object.keys(o).reduce((a, b) => o[a] >= o[b] ? a : b) : null;
+  const out = Object.values(rows).map(p => {
+    const prompt = p.input + p.cache_write + p.cache_read, n = p.sessions.size;
+    const row = Object.assign({}, p, {sessions: n, share: pctOf(p.cost, totalCost),
+      cache_hit_rate: pctOf(p.cache_read, prompt), avg_context: p.requests ? prompt / p.requests : 0,
+      cost_per_session: n ? p.cost / n : 0, top_model: top(p.models), top_tool: top(p.tool_calls)});
+    delete row.models; delete row.tool_calls; return row;
+  });
+  out.sort((a, b) => b.cost - a.cost);
+  return out;
+}
+function costByType(reqs) {
+  const parts = {input: 0, cache_write: 0, cache_read: 0, output: 0};
+  for (const r of reqs) {
+    const u = r.usage, p = priceFor(r.model, r.context); if (!p) continue;
+    const inp = p[0] / 1e6, out = p[1] / 1e6, read = p[2] / 1e6;
+    parts.input += u.input * inp;
+    parts.cache_write += u.cache_write_5m * inp * CACHE_WRITE_5M + u.cache_write_1h * inp * CACHE_WRITE_1H;
+    parts.cache_read += u.cache_read * read; parts.output += u.output * out;
+  }
+  return parts;
+}
+function insights(s, sessions, tools, byDay, byModel) {
+  const out = [];
+  if (!s.requests) return [{level: "info", text: "No usage found in the loaded files."}];
+  const parts = s.cost_by_type, tc = Object.values(parts).reduce((a, b) => a + b, 0);
+  if (tc) {
+    const driver = Object.keys(parts).reduce((a, b) => parts[a] >= parts[b] ? a : b);
+    const label = {input: "uncached input", cache_write: "cache writes", cache_read: "cache reads", output: "output"}[driver];
+    out.push({level: "info", text: `${label[0].toUpperCase() + label.slice(1)} drive ${(100 * parts[driver] / tc).toFixed(0)}% of estimated spend ($${parts[driver].toFixed(2)} of $${tc.toFixed(2)}).`});
+  }
+  const hit = s.cache_hit_rate;
+  out.push({level: hit >= 80 ? "good" : hit >= 50 ? "warning" : "critical",
+    text: `Cache hit rate is ${hit.toFixed(1)}%: ${fmtPlain(s.cache_read)} of ${fmtPlain(s.prompt)} prompt tokens came from cache, saving about $${s.cache_savings.toFixed(2)} versus no caching.`});
+  if (s.cache_write) {
+    const share1h = pctOf(s.cache_write_1h, s.cache_write);
+    if (share1h > 50) out.push({level: "info", text: `${share1h.toFixed(0)}% of cache writes use the 1-hour TTL (billed at 2x input vs 1.25x for 5-minute). That pays off only when you pause more than 5 minutes between turns.`});
+    const rpw = s.cache_read / s.cache_write;
+    if (rpw < 3) out.push({level: "warning", text: `Each cached token is read only ${rpw.toFixed(1)}x on average. Short sessions or frequent context changes (new files, edited CLAUDE.md, switching models) keep re-writing the cache.`});
+  }
+  if (s.output) out.push({level: "info", text: `Thinking is ${pctOf(s.thinking, s.output).toFixed(0)}% of output tokens (${fmtPlain(s.thinking)} of ${fmtPlain(s.output)}); average output is ${s.avg_output.toFixed(0)} tokens per request.`});
+  out.push({level: s.avg_context > 150000 ? "warning" : "info", text: `Average request carries ${fmtPlain(s.avg_context)} tokens of context (max ${fmtPlain(s.max_context)}). ` +
+    (s.large_context_requests ? `${s.large_context_requests} requests exceeded ${fmtPlain(LARGE_CONTEXT)}; /compact or /clear between tasks keeps this down.` : "None exceeded 200K.")});
+  if (sessions.length > 1 && s.cost) { const t = sessions[0];
+    out.push({level: "info", text: `Most expensive session (${t.session.slice(0, 8)}, ${t.project}) cost $${t.cost.toFixed(2)}, ${pctOf(t.cost, s.cost).toFixed(0)}% of the total, across ${t.requests} requests.`}); }
+  if (tools.length) { const t = tools[0];
+    out.push({level: "info", text: `'${t.tool}' returned the most text into context: ~${fmtPlain(t.result_tokens_est)} tokens over ${t.calls} calls (~${fmtPlain(t.avg_result_tokens)} each). Narrower reads/searches shrink every later turn.`});
+    const errs = tools.filter(x => x.errors).sort((a, b) => b.errors - a.errors);
+    if (errs.length) out.push({level: "warning", text: "Tool errors waste a round trip each: " + errs.slice(0, 4).map(x => `${x.tool} (${x.errors})`).join(", ") + "."});
+  }
+  if (Object.keys(byDay).length > 1) { const [day, b] = Object.entries(byDay).reduce((a, x) => x[1].cost > a[1].cost ? x : a);
+    out.push({level: "info", text: `Busiest day was ${day}: $${b.cost.toFixed(2)} over ${b.requests} requests.`}); }
+  if (Object.keys(byModel).length > 1) {
+    const names = Object.entries(byModel).sort((a, b) => b[1].cost - a[1].cost).map(([m, b]) => `${m} ${pctOf(b.cost, s.cost).toFixed(0)}%`).join(", ");
+    out.push({level: "info", text: `Spend by model: ${names}.`});
+  }
+  if (s.unpriced_requests) out.push({level: "warning", text: `${s.unpriced_requests} requests used a model with no price in the table; they are excluded from cost.`});
+  return out;
+}
+
+const dayKey = r => { const d = new Date(r.timestamp); return isNaN(d) ? null : d.toISOString().slice(0, 10) === undefined ? null :
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+function analyze(allReqs, {days, project, cfg}) {
+  const lifetime = blank();
+  allReqs.forEach(r => addInto(lifetime, r));
+  Object.assign(lifetime, {
+    limit_tokens: allReqs.reduce((a, r) => a + limitTokens(r, cfg.count_cache_reads), 0),
+    sessions: new Set(allReqs.map(r => r.session)).size,
+    projects: new Set(allReqs.map(r => r.project)).size,
+    first: allReqs.length ? allReqs[0].timestamp : null,
+  });
+  let reqs = allReqs;
+  if (days) { const cutoff = Date.now() - days * 86400000; reqs = reqs.filter(r => tsMs(r) >= cutoff); }
+  const projects = projectsOverview(reqs);
+  if (project) reqs = reqs.filter(r => r.project === project);
+
+  const totals = blank(), byDay = {}, byHour = {}, byModel = {}, bySession = {}, byProject = {}, meta = {};
+  let cw1h = 0, cw5m = 0, web = 0, unpriced = 0, uncached = 0; const ctx = [];
+  for (let h = 0; h < 24; h++) byHour[h] = blank();
+  for (const r of reqs) {
+    addInto(totals, r);
+    const d = new Date(r.timestamp);
+    if (!isNaN(d)) { const dk = dayKey(r); (byDay[dk] ||= blank()); addInto(byDay[dk], r); addInto(byHour[d.getHours()], r); }
+    (byModel[r.model] ||= blank()); addInto(byModel[r.model], r);
+    (bySession[r.session] ||= blank()); addInto(bySession[r.session], r);
+    (byProject[r.project] ||= blank()); addInto(byProject[r.project], r);
+    const m = meta[r.session] ||= {project: r.project, start: r.timestamp, max_context: 0};
+    m.max_context = Math.max(m.max_context, r.context);
+    cw1h += r.usage.cache_write_1h; cw5m += r.usage.cache_write_5m; web += r.usage.web_search; ctx.push(r.context);
+    if (r.cost == null) unpriced++; else uncached += r.uncached_cost;
+  }
+  const prompt = totals.input + totals.cache_write + totals.cache_read;
+  const sessions = Object.entries(bySession).map(([sid, b]) => Object.assign({session: sid}, b, meta[sid])).sort((a, b) => b.cost - a.cost);
+
+  const toolStats = {};
+  for (const r of reqs) {
+    for (const n of r.tools) (toolStats[n] ||= {calls: 0, result_chars: 0, errors: 0}).calls++;
+    for (const [n, ch, err] of r.tool_results) { const t = (toolStats[n] ||= {calls: 0, result_chars: 0, errors: 0}); t.result_chars += ch; t.errors += err ? 1 : 0; }
+  }
+  const tools = Object.entries(toolStats).map(([tool, s]) => { const est = Math.floor(s.result_chars / CHARS_PER_TOKEN);
+    return {tool, calls: s.calls, errors: s.errors, result_tokens_est: est, avg_result_tokens: s.calls ? Math.floor(est / s.calls) : 0}; })
+    .sort((a, b) => b.result_tokens_est - a.result_tokens_est);
+  const topReqs = [...reqs].sort((a, b) => (b.cost || 0) - (a.cost || 0)).slice(0, 15).map(r => ({
+    timestamp: r.timestamp, session: r.session, model: r.model, context: r.context, output: r.usage.output, cost: r.cost, tools: r.tools, subagent: r.subagent}));
+
+  const summary = Object.assign({}, totals, {
+    prompt, sessions: Object.keys(bySession).length, projects: Object.keys(byProject).length,
+    cache_hit_rate: pctOf(totals.cache_read, prompt), uncached_cost: uncached, cache_savings: uncached - totals.cost,
+    cache_write_1h: cw1h, cache_write_5m: cw5m, web_search_requests: web,
+    avg_context: ctx.length ? ctx.reduce((a, b) => a + b, 0) / ctx.length : 0,
+    max_context: ctx.length ? Math.max(...ctx) : 0, large_context_requests: ctx.filter(c => c > LARGE_CONTEXT).length,
+    avg_output: totals.requests ? totals.output / totals.requests : 0, unpriced_requests: unpriced,
+    first: reqs.length ? reqs[0].timestamp : null, last: reqs.length ? reqs[reqs.length - 1].timestamp : null,
+    cost_by_type: costByType(reqs),
+  });
+  const limWin = limitStatus(allReqs, cfg);
+  return {
+    generated_at: new Date().toISOString(), logs_dir: `${allReqs.length} requests parsed in your browser`, project: project || null,
+    summary, lifetime, limits: {count_cache_reads: cfg.count_cache_reads, windows: limWin},
+    projects,
+    by_day: Object.keys(byDay).sort().map(d => Object.assign({day: d}, byDay[d])),
+    by_hour: Array.from({length: 24}, (_, h) => Object.assign({hour: h}, byHour[h])),
+    by_model: Object.entries(byModel).map(([model, v]) => Object.assign({model}, v)).sort((a, b) => b.cost - a.cost),
+    sessions: sessions.slice(0, 50), tools, top_requests: topReqs,
+    insights: limitInsights(limWin).concat(insights(summary, sessions, tools, byDay, byModel)),
+  };
+}
+
+// ===== file loading + glue =====
+let ALL = [];
+const DAYS = () => $("days").value ? Number($("days").value) : null;
+
+function compute() {
+  const cfg = loadLimitsCfg();
+  limitsCfg = cfg;
+  return analyze(ALL, {days: DAYS(), project: $("project").value || null, cfg});
+}
+function load() {
+  if (!ALL.length) { $("meta").textContent = "No logs loaded yet — drop your .jsonl files or a folder above."; return; }
+  render(compute());
+  $("drop").classList.add("loaded");
+}
+function schedule() {  // persist filters only (no live source to poll)
+  try { localStorage.setItem("tokens.days", $("days").value); localStorage.setItem("tokens.project", $("project").value); } catch {}
+}
+
+$("editLimits").onclick = () => { limitsCfg = loadLimitsCfg(); openLimitsForm(); };
+$("cancelLimits").onclick = () => $("limitsForm").classList.remove("open");
+$("limitsForm").onsubmit = e => {
+  e.preventDefault();
+  const body = {count_cache_reads: $("countCacheReads").checked, limits: {}};
+  for (const input of $("limitsFields").querySelectorAll("input")) { const [w, k] = input.name.split("."); (body.limits[w] ||= {})[k] = input.value === "" ? null : Number(input.value); }
+  saveLimitsCfg(body); $("limitsForm").classList.remove("open"); load();
+};
+
+async function ingest(fileList) {
+  const files = [];
+  for (const f of fileList) if (f.name.endsWith(".jsonl")) files.push({path: f.webkitRelativePath || f.name, text: await f.text()});
+  if (!files.length) { $("dropMsg").innerHTML = '<span class="err">No .jsonl files found in that selection.</span>'; return; }
+  ALL = parseFiles(files);
+  $("dropMsg").textContent = `Loaded ${files.length} file${files.length === 1 ? "" : "s"} · ${ALL.length} requests.`;
+  load();
+}
+// Drag-and-drop, including folders (recurse directory entries).
+function walkEntry(entry, path, acc) {
+  return new Promise(res => {
+    if (entry.isFile) entry.file(f => { acc.push({path: (path + f.name), _f: f}); res(); });
+    else { const rd = entry.createReader(); const all = [];
+      const read = () => rd.readEntries(es => { if (!es.length) { Promise.all(all.map(e => walkEntry(e[0], e[1], acc))).then(res); }
+        else { es.forEach(e => all.push([e, path + entry.name + "/"])); read(); } }); read(); }
+  });
+}
+const dz = $("drop");
+["dragover", "dragenter"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); if (ev === "dragleave") dz.classList.remove("over"); }));
+dz.addEventListener("drop", async e => {
+  dz.classList.remove("over");
+  const items = [...(e.dataTransfer.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (items.length) {
+    const acc = []; await Promise.all(items.map(it => walkEntry(it, "", acc)));
+    const files = []; for (const a of acc) if (a.path.endsWith(".jsonl")) files.push({path: a.path, text: await a._f.text()});
+    if (!files.length) { $("dropMsg").innerHTML = '<span class="err">No .jsonl files found in that drop.</span>'; return; }
+    ALL = parseFiles(files); $("dropMsg").textContent = `Loaded ${files.length} file${files.length === 1 ? "" : "s"} · ${ALL.length} requests.`; load();
+  } else if (e.dataTransfer.files.length) ingest(e.dataTransfer.files);
+});
+$("pickFolder").onclick = () => $("folderInput").click();
+$("pickFiles").onclick = () => $("filesInput").click();
+$("folderInput").onchange = e => ingest(e.target.files);
+$("filesInput").onchange = e => ingest(e.target.files);
+
+$("project").onchange = () => setProject($("project").value);
+$("clearProject").onclick = () => setProject("");
+$("days").onchange = () => { schedule(); load(); };
+try { $("days").value = localStorage.getItem("tokens.days") || ""; } catch {}
+
+</script>
+</body>
+</html>
