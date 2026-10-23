@@ -1,6 +1,9 @@
 from flask import Flask, jsonify, render_template_string
 
+from token_dashboard import bp as tokens_bp
+
 app = Flask(__name__)
+app.register_blueprint(tokens_bp)
 
 HTML = """
 <!DOCTYPE html>
@@ -62,6 +65,7 @@ HTML = """
         <p>Your Flask app is up and running. Edit <code>app.py</code> to start building.</p>
         <button class="btn" onclick="ping()">Ping the API</button>
         <div id="msg"></div>
+        <p style="margin:24px 0 0"><a href="/tokens">Token usage dashboard &rarr;</a></p>
     </div>
     <script>
         async function ping() {
