@@ -1,0 +1,114 @@
+{% extends "_shell.html" %}
+{% block title %}Accounts — Money Tracker{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Accounts</h1></div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2 id="formTitle">Add account</h2>
+    <form id="form">
+      <input type="hidden" id="editId">
+      <div class="field"><label for="name">Name</label>
+        <input type="text" id="name" maxlength="60" placeholder="e.g. HDFC Savings" required></div>
+      <div class="row">
+        <div class="field"><label for="type">Type</label>
+          <select id="type">
+            <option value="bank">Bank</option>
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="wallet">Wallet</option>
+          </select></div>
+        <div class="field"><label for="opening">Opening balance (₹)</label>
+          <input type="number" id="opening" step="0.01" value="0"></div>
+      </div>
+      <button class="btn" type="submit" id="submit">Add account</button>
+      <button class="btn ghost" type="button" id="cancel" style="display:none">Cancel</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Your accounts</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th style="text-align:right">Balance</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block page_script %}
+<script type="module">
+  import { db, money, esc, toast } from "{{ url_for('static', filename='js/app.js') }}";
+  const $ = (id) => document.getElementById(id);
+
+  function resetForm() {
+    $("editId").value = ""; $("name").value = ""; $("opening").value = "0"; $("type").value = "bank";
+    $("formTitle").textContent = "Add account";
+    $("submit").textContent = "Add account";
+    $("cancel").style.display = "none";
+  }
+
+  async function load() {
+    // Balances come from the RPC (includes transactions); opening balances from the table (for editing).
+    const [bal, raw] = await Promise.all([
+      db.rpc("account_balances"),
+      db.from("accounts").select("id, name, type, opening_balance").order("name"),
+    ]);
+    if (bal.error) return toast(bal.error.message);
+    if (raw.error) return toast(raw.error.message);
+    const opening = Object.fromEntries(raw.data.map((a) => [a.id, a]));
+
+    $("rows").innerHTML = bal.data.length ? bal.data.map((a) => `
+      <tr>
+        <td>${esc(a.name)}</td>
+        <td><span class="pill">${esc(a.type)}</span></td>
+        <td class="amt ${a.balance < 0 ? "neg" : ""}">${money(a.balance)}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="icon-btn" title="Edit" data-edit="${a.id}" style="color:var(--brand)">✎</button>
+          <button class="icon-btn" title="Delete" data-del="${a.id}">✕</button>
+        </td>
+      </tr>`).join("") : `<tr><td colspan="4" class="empty">No accounts yet.</td></tr>`;
+
+    $("rows").querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => {
+        const a = opening[b.dataset.edit];
+        $("editId").value = a.id; $("name").value = a.name; $("type").value = a.type;
+        $("opening").value = a.opening_balance;
+        $("formTitle").textContent = "Edit account";
+        $("submit").textContent = "Save changes";
+        $("cancel").style.display = "";
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+    });
+    $("rows").querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("Delete this account? Its transactions will also be removed.")) return;
+        const { error } = await db.from("accounts").delete().eq("id", b.dataset.del);
+        if (error) return toast(error.message);
+        resetForm(); load();
+      };
+    });
+  }
+
+  $("cancel").onclick = resetForm;
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const row = {
+      name: $("name").value.trim(),
+      type: $("type").value,
+      opening_balance: parseFloat($("opening").value) || 0,
+    };
+    if (!row.name) return toast("Name is required.");
+    const id = $("editId").value;
+    const { error } = id
+      ? await db.from("accounts").update(row).eq("id", id)
+      : await db.from("accounts").insert(row);
+    if (error) return toast(error.message);
+    toast("Saved.", "ok");
+    resetForm(); load();
+  });
+
+  if (db) load();
+</script>
+{% endblock %}

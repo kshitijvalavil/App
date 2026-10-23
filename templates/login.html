@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Money Tracker{% endblock %}
+{% block body %}
+<div class="auth-wrap">
+  <div class="card auth-card">
+    <div class="brand">💰 Money<span>Tracker</span></div>
+    <p class="auth-sub">Sign in to track your money</p>
+    <form id="loginForm">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" autocomplete="email" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" autocomplete="current-password" required>
+      </div>
+      <button class="btn" type="submit" id="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+<script type="module">
+  import { db, toast } from "{{ url_for('static', filename='js/app.js') }}";
+
+  // Already signed in? Go to the dashboard.
+  if (db) {
+    const { data } = await db.auth.getUser();
+    if (data.user) window.location.href = "/";
+  }
+
+  document.getElementById("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!db) { toast("Supabase isn't configured yet."); return; }
+    const btn = document.getElementById("submit");
+    btn.disabled = true; btn.textContent = "Signing in…";
+    const { error } = await db.auth.signInWithPassword({
+      email: document.getElementById("email").value.trim(),
+      password: document.getElementById("password").value,
+    });
+    if (error) {
+      toast(error.message);
+      btn.disabled = false; btn.textContent = "Sign in";
+    } else {
+      window.location.href = "/";
+    }
+  });
+</script>
+{% endblock %}

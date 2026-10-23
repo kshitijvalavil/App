@@ -1,0 +1,174 @@
+{% extends "_shell.html" %}
+{% block title %}Transactions — Money Tracker{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Transactions</h1></div>
+
+<div class="card" style="margin-bottom:16px">
+  <h2>Add transaction</h2>
+  <form id="form">
+    <div class="field">
+      <div class="toggle" id="typeToggle">
+        <button type="button" data-type="expense" class="active">Expense</button>
+        <button type="button" data-type="income">Income</button>
+        <button type="button" data-type="transfer">Transfer</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="amount">Amount (₹)</label>
+        <input type="number" id="amount" step="0.01" min="0.01" required></div>
+      <div class="field"><label for="date">Date</label>
+        <input type="date" id="date" required></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="account" id="accountLabel">Account</label>
+        <select id="account"></select></div>
+      <div class="field" id="categoryField"><label for="category">Category</label>
+        <select id="category"></select></div>
+      <div class="field" id="toAccountField" style="display:none"><label for="toAccount">To account</label>
+        <select id="toAccount"></select></div>
+    </div>
+    <div class="field"><label for="note">Note (optional)</label>
+      <input type="text" id="note" maxlength="200"></div>
+    <button class="btn" type="submit">Add transaction</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="page-head" style="margin-bottom:16px">
+    <h2 style="margin:0">History</h2>
+    <div class="row" style="margin:0">
+      <input type="month" id="fMonth">
+      <select id="fAccount"><option value="">All accounts</option></select>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>Date</th><th>Type</th><th>Category</th><th>Account</th><th>Note</th>
+      <th style="text-align:right">Amount</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block page_script %}
+<script type="module">
+  import { db, money, esc, thisMonth, today, toast } from "{{ url_for('static', filename='js/app.js') }}";
+  const $ = (id) => document.getElementById(id);
+
+  let type = "expense";
+  let accounts = [];
+  let categories = [];
+
+  async function loadLists() {
+    const [a, c] = await Promise.all([
+      db.from("accounts").select("id, name").order("name"),
+      db.from("categories").select("id, name, kind").order("name"),
+    ]);
+    if (a.error) return toast(a.error.message);
+    if (c.error) return toast(c.error.message);
+    accounts = a.data; categories = c.data;
+
+    const accOpts = accounts.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("");
+    $("account").innerHTML = accOpts;
+    $("toAccount").innerHTML = accOpts;
+    $("fAccount").innerHTML = `<option value="">All accounts</option>` + accOpts;
+    fillCategories();
+  }
+
+  function fillCategories() {
+    const kind = type === "income" ? "income" : "expense";
+    $("category").innerHTML = categories
+      .filter((c) => c.kind === kind)
+      .map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  }
+
+  $("typeToggle").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      type = b.dataset.type;
+      $("typeToggle").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+      const transfer = type === "transfer";
+      $("categoryField").style.display = transfer ? "none" : "";
+      $("toAccountField").style.display = transfer ? "" : "none";
+      $("accountLabel").textContent = transfer ? "From account" : "Account";
+      if (!transfer) fillCategories();
+    };
+  });
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const amount = parseFloat($("amount").value);
+    if (!(amount > 0)) return toast("Amount must be greater than zero.");
+
+    const row = {
+      amount,
+      type,
+      occurred_on: $("date").value || today(),
+      account_id: $("account").value,
+      note: $("note").value.trim(),
+      to_account_id: null,
+      category_id: null,
+    };
+    if (type === "transfer") {
+      if ($("account").value === $("toAccount").value)
+        return toast("Transfer needs two different accounts.");
+      row.to_account_id = $("toAccount").value;
+    } else {
+      row.category_id = $("category").value;
+    }
+
+    const { error } = await db.from("transactions").insert(row);
+    if (error) return toast(error.message);
+    $("amount").value = ""; $("note").value = "";
+    toast("Added.", "ok");
+    loadRows();
+  });
+
+  async function loadRows() {
+    const month = $("fMonth").value;
+    const account = $("fAccount").value;
+    let q = db.from("transactions")
+      .select("id, occurred_on, amount, type, note, category_id, account_id, to_account_id, " +
+              "categories(name), from_acc:accounts!transactions_account_id_fkey(name), " +
+              "to_acc:accounts!transactions_to_account_id_fkey(name)")
+      .order("occurred_on", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (month) q = q.gte("occurred_on", month + "-01").lte("occurred_on", month + "-31");
+    if (account) q = q.or(`account_id.eq.${account},to_account_id.eq.${account}`);
+
+    const { data, error } = await q;
+    if (error) return toast(error.message);
+
+    $("rows").innerHTML = data.length ? data.map((t) => {
+      const sign = t.type === "income" ? "+" : t.type === "expense" ? "−" : "";
+      const cls = t.type === "income" ? "pos" : t.type === "expense" ? "neg" : "";
+      const cat = t.type === "transfer"
+        ? `→ ${esc(t.to_acc?.name || "—")}`
+        : esc(t.categories?.name || "—");
+      return `<tr>
+        <td>${t.occurred_on}</td>
+        <td><span class="pill">${t.type}</span></td>
+        <td>${cat}</td>
+        <td>${esc(t.from_acc?.name || "—")}</td>
+        <td>${esc(t.note)}</td>
+        <td class="amt ${cls}">${sign}${money(t.amount)}</td>
+        <td><button class="icon-btn" title="Delete" data-del="${t.id}">✕</button></td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7" class="empty">No transactions match.</td></tr>`;
+
+    $("rows").querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("Delete this transaction?")) return;
+        const { error } = await db.from("transactions").delete().eq("id", b.dataset.del);
+        if (error) return toast(error.message);
+        loadRows();
+      };
+    });
+  }
+
+  $("date").value = today();
+  $("fMonth").value = thisMonth();
+  $("fMonth").addEventListener("change", loadRows);
+  $("fAccount").addEventListener("change", loadRows);
+
+  if (db) { await loadLists(); loadRows(); }
+</script>
+{% endblock %}

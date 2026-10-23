@@ -1,0 +1,99 @@
+{% extends "_shell.html" %}
+{% block title %}Dashboard — Money Tracker{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <input type="month" id="month" style="width:auto">
+</div>
+
+<div class="grid cols-3" style="margin-bottom:16px">
+  <div class="card stat"><div class="label">Total balance</div><div class="value" id="balance">—</div></div>
+  <div class="card stat"><div class="label">Income this month</div><div class="value pos" id="income">—</div></div>
+  <div class="card stat"><div class="label">Spent this month</div><div class="value neg" id="expense">—</div></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Accounts</h2>
+    <table><tbody id="accounts"></tbody></table>
+  </div>
+  <div class="card">
+    <h2>Budgets this month</h2>
+    <div id="budgets"></div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h2>Recent transactions</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Category</th><th>Account</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody id="recent"></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block page_script %}
+<script type="module">
+  import { db, money, esc, thisMonth, toast } from "{{ url_for('static', filename='js/app.js') }}";
+
+  const $ = (id) => document.getElementById(id);
+  const monthInput = $("month");
+  monthInput.value = thisMonth();
+
+  async function load() {
+    const month = monthInput.value || thisMonth();
+
+    const [summary, accounts, budgets, recent] = await Promise.all([
+      db.rpc("dashboard_summary", { p_month: month }),
+      db.rpc("account_balances"),
+      db.rpc("budget_status", { p_month: month }),
+      db.from("transactions")
+        .select("occurred_on, amount, type, note, categories(name), accounts!transactions_account_id_fkey(name)")
+        .order("occurred_on", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(8),
+    ]);
+
+    for (const r of [summary, accounts, budgets, recent]) {
+      if (r.error) { toast(r.error.message); return; }
+    }
+
+    const s = summary.data[0] || { total_balance: 0, month_income: 0, month_expense: 0 };
+    $("balance").textContent = money(s.total_balance);
+    $("balance").className = "value " + (s.total_balance < 0 ? "neg" : "pos");
+    $("income").textContent = money(s.month_income);
+    $("expense").textContent = money(s.month_expense);
+
+    $("accounts").innerHTML = accounts.data.length
+      ? accounts.data.map((a) => `<tr><td>${esc(a.name)} <span class="pill">${esc(a.type)}</span></td>
+          <td class="amt ${a.balance < 0 ? "neg" : ""}">${money(a.balance)}</td></tr>`).join("")
+      : `<tr><td class="empty">No accounts yet</td></tr>`;
+
+    $("budgets").innerHTML = budgets.data.length
+      ? budgets.data.map((b) => {
+          const pct = Math.min(100, (b.spent / b.monthly_limit) * 100);
+          const over = b.spent > b.monthly_limit;
+          return `<div class="bar-row">
+            <div class="top"><span>${esc(b.category)}</span>
+              <span class="${over ? "neg" : ""}">${money(b.spent)} / ${money(b.monthly_limit)}</span></div>
+            <div class="bar"><div class="${over ? "over" : ""}" style="width:${pct}%"></div></div>
+          </div>`;
+        }).join("")
+      : `<div class="empty">No budgets set. <a href="/budgets" style="color:var(--brand)">Add one →</a></div>`;
+
+    $("recent").innerHTML = recent.data.length
+      ? recent.data.map((t) => {
+          const sign = t.type === "income" ? "+" : t.type === "expense" ? "−" : "";
+          const cls = t.type === "income" ? "pos" : t.type === "expense" ? "neg" : "";
+          const label = t.type === "transfer" ? "Transfer" : esc(t.categories?.name || "—");
+          return `<tr><td>${t.occurred_on}</td><td>${label}</td>
+            <td>${esc(t.accounts?.name || "—")}</td><td>${esc(t.note)}</td>
+            <td class="amt ${cls}">${sign}${money(t.amount)}</td></tr>`;
+        }).join("")
+      : `<tr><td colspan="5" class="empty">No transactions yet. <a href="/transactions" style="color:var(--brand)">Add one →</a></td></tr>`;
+  }
+
+  monthInput.addEventListener("change", load);
+  if (db) load();
+</script>
+{% endblock %}

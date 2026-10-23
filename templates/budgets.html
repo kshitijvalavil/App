@@ -1,0 +1,103 @@
+{% extends "_shell.html" %}
+{% block title %}Budgets — Money Tracker{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Budgets</h1>
+  <input type="month" id="month" style="width:auto">
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Set a monthly limit</h2>
+    <p style="color:var(--muted);font-size:0.88rem;margin-bottom:16px">
+      A limit repeats every month. Set one per expense category.</p>
+    <form id="form">
+      <div class="row">
+        <div class="field"><label for="category">Category</label>
+          <select id="category"></select></div>
+        <div class="field"><label for="limit">Monthly limit (₹)</label>
+          <input type="number" id="limit" step="0.01" min="0.01" required></div>
+      </div>
+      <button class="btn" type="submit">Save limit</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Progress this month</h2>
+    <div id="progress"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page_script %}
+<script type="module">
+  import { db, money, esc, thisMonth, toast } from "{{ url_for('static', filename='js/app.js') }}";
+  const $ = (id) => document.getElementById(id);
+  $("month").value = thisMonth();
+
+  async function loadCategories() {
+    const { data, error } = await db.from("categories")
+      .select("id, name").eq("kind", "expense").order("name");
+    if (error) return toast(error.message);
+    $("category").innerHTML = data.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  }
+
+  async function loadProgress() {
+    const month = $("month").value || thisMonth();
+    // budget_status returns category name, limit, spent — but we need ids to edit/remove.
+    const [status, budgets] = await Promise.all([
+      db.rpc("budget_status", { p_month: month }),
+      db.from("budgets").select("id, monthly_limit, category_id, categories(name)"),
+    ]);
+    if (status.error) return toast(status.error.message);
+    if (budgets.error) return toast(budgets.error.message);
+
+    if (!budgets.data.length) {
+      $("progress").innerHTML = `<div class="empty">No budgets set yet.</div>`;
+      return;
+    }
+    const spentByName = Object.fromEntries(status.data.map((s) => [s.category, s.spent]));
+    $("progress").innerHTML = budgets.data
+      .sort((a, b) => (a.categories?.name || "").localeCompare(b.categories?.name || ""))
+      .map((b) => {
+        const name = b.categories?.name || "—";
+        const spent = Number(spentByName[name] || 0);
+        const pct = Math.min(100, (spent / b.monthly_limit) * 100);
+        const over = spent > b.monthly_limit;
+        return `<div class="bar-row">
+          <div class="top">
+            <span>${esc(name)}</span>
+            <span class="${over ? "neg" : ""}">${money(spent)} / ${money(b.monthly_limit)}
+              <button class="icon-btn" title="Remove limit" data-del="${b.id}">✕</button></span>
+          </div>
+          <div class="bar"><div class="${over ? "over" : ""}" style="width:${pct}%"></div></div>
+        </div>`;
+      }).join("");
+
+    $("progress").querySelectorAll("[data-del]").forEach((btn) => {
+      btn.onclick = async () => {
+        const { error } = await db.from("budgets").delete().eq("id", btn.dataset.del);
+        if (error) return toast(error.message);
+        loadProgress();
+      };
+    });
+  }
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const limit = parseFloat($("limit").value);
+    if (!(limit > 0)) return toast("Limit must be greater than zero.");
+    // One budget per category: upsert on the (user_id, category_id) unique key.
+    const { error } = await db.from("budgets")
+      .upsert({ category_id: $("category").value, monthly_limit: limit },
+              { onConflict: "user_id,category_id" });
+    if (error) return toast(error.message);
+    $("limit").value = "";
+    toast("Saved.", "ok");
+    loadProgress();
+  });
+
+  $("month").addEventListener("change", loadProgress);
+  if (db) { await loadCategories(); loadProgress(); }
+</script>
+{% endblock %}

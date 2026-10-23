@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Money Tracker{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <!-- supabase-js (UMD global `supabase`) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script>
+    window.__CONFIG = { url: {{ SUPABASE_URL | tojson }}, key: {{ SUPABASE_ANON_KEY | tojson }} };
+  </script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+{% if not config_ready %}
+  <div style="padding:16px"><div class="notice">
+    Supabase isn't configured yet. Set <code>SUPABASE_URL</code> and
+    <code>SUPABASE_ANON_KEY</code> (see the README) to sign in and store data.
+  </div></div>
+{% endif %}
+{% block body %}{% endblock %}
+</body>
+</html>
