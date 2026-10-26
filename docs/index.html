@@ -119,8 +119,12 @@
       <label>Project
         <select id="project"><option value="">All projects</option></select>
       </label>
-      <button class="primary" id="pickFolder" type="button">Load folder</button>
+      <button class="primary" id="pickFolder" type="button">Connect folder</button>
       <button id="pickFiles" type="button">Pick files</button>
+      <button id="refresh" type="button">&#8635; Refresh</button>
+      <label>Auto
+        <select id="auto"><option value="0">Off</option><option value="30">30s</option><option value="60">1 min</option><option value="300">5 min</option></select>
+      </label>
     </div>
   </header>
 
@@ -129,7 +133,8 @@
     <input type="file" id="filesInput" accept=".jsonl" multiple hidden>
     <div class="drop-inner">
       <b>Drop your Claude logs here</b>
-      <p class="hint">Drag the <code>~/.claude/projects</code> folder (or any <code>.jsonl</code> files) onto this box, or use the buttons above. Nothing is uploaded — parsing happens locally in your browser.</p>
+      <p class="hint">Drag the <code>~/.claude/projects</code> folder (or any <code>.jsonl</code> files) onto this box, or use the buttons above. Nothing is uploaded — parsing happens locally in your browser.<br>
+      In Chrome or Edge, <b>Connect folder</b> lets <b>&#8635; Refresh</b> re-read your folder so new chats show up — pick the folder once and it reconnects next time. Only Claude Code sessions saved on this computer appear here; sessions you run on the web aren't stored locally.</p>
       <div id="dropMsg" class="hint"></div>
     </div>
   </section>
@@ -731,8 +736,16 @@ function load() {
   render(compute());
   $("drop").classList.add("loaded");
 }
-function schedule() {  // persist filters only (no live source to poll)
-  try { localStorage.setItem("tokens.days", $("days").value); localStorage.setItem("tokens.project", $("project").value); } catch {}
+let autoTimer = null;
+function schedule() {  // persist filters; poll the connected folder if auto-refresh is on
+  try {
+    localStorage.setItem("tokens.days", $("days").value);
+    localStorage.setItem("tokens.project", $("project").value);
+    localStorage.setItem("tokens.auto", $("auto").value);
+  } catch {}
+  clearInterval(autoTimer);
+  const s = Number($("auto").value);
+  if (s && dirHandle) autoTimer = setInterval(() => scanHandle(true), s * 1000);
 }
 
 $("editLimits").onclick = () => { limitsCfg = loadLimitsCfg(); openLimitsForm(); };
@@ -774,15 +787,68 @@ dz.addEventListener("drop", async e => {
     ALL = parseFiles(files); $("dropMsg").textContent = `Loaded ${files.length} file${files.length === 1 ? "" : "s"} · ${ALL.length} requests.`; load();
   } else if (e.dataTransfer.files.length) ingest(e.dataTransfer.files);
 });
-$("pickFolder").onclick = () => $("folderInput").click();
+// ---- Live folder access (Chrome / Edge: File System Access API) ----
+let dirHandle = null;
+const idb = () => new Promise((res, rej) => { const r = indexedDB.open("tokensFS", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("h"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function idbSet(k, v) { const db = await idb(); return new Promise((res, rej) => { const t = db.transaction("h", "readwrite"); t.objectStore("h").put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
+async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const t = db.transaction("h", "readonly"); const q = t.objectStore("h").get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function ensurePerm(h, ask) {
+  const o = {mode: "read"};
+  if ((await h.queryPermission(o)) === "granted") return true;
+  return ask && (await h.requestPermission(o)) === "granted";
+}
+async function scanHandle(auto) {
+  if (!dirHandle) return;
+  if (!(await ensurePerm(dirHandle, !auto))) {
+    if (!auto) $("dropMsg").innerHTML = '<span class="err">Permission needed — click Connect folder again.</span>'; return;
+  }
+  const files = [];
+  async function walk(h, path) {
+    for await (const [name, ch] of h.entries()) {
+      if (ch.kind === "directory") await walk(ch, path + name + "/");
+      else if (name.endsWith(".jsonl")) { try { const f = await ch.getFile(); files.push({path: path + name, text: await f.text()}); } catch {} }
+    }
+  }
+  try { await walk(dirHandle, (dirHandle.name || "") + "/"); }
+  catch { if (!auto) $("dropMsg").innerHTML = '<span class="err">Could not read that folder.</span>'; return; }
+  if (!files.length) { $("dropMsg").innerHTML = '<span class="err">No .jsonl files found in that folder.</span>'; return; }
+  ALL = parseFiles(files);
+  $("dropMsg").textContent = `Connected to ${dirHandle.name}/ · ${files.length} files · ${ALL.length} requests · refreshed ${new Date().toLocaleTimeString()}`;
+  load();
+}
+async function pickDirectory() {
+  if (window.showDirectoryPicker) {
+    let h; try { h = await showDirectoryPicker({id: "claude-logs", mode: "read"}); } catch { return; }
+    dirHandle = h; try { await idbSet("dir", h); } catch {}
+    schedule(); scanHandle(false);
+  } else $("folderInput").click();
+}
+
+$("pickFolder").onclick = pickDirectory;
 $("pickFiles").onclick = () => $("filesInput").click();
 $("folderInput").onchange = e => ingest(e.target.files);
 $("filesInput").onchange = e => ingest(e.target.files);
+$("refresh").onclick = () => dirHandle ? scanHandle(false) : (ALL.length ? load() : pickDirectory());
+$("auto").onchange = schedule;
 
 $("project").onchange = () => setProject($("project").value);
 $("clearProject").onclick = () => setProject("");
 $("days").onchange = () => { schedule(); load(); };
-try { $("days").value = localStorage.getItem("tokens.days") || ""; } catch {}
+try {
+  $("days").value = localStorage.getItem("tokens.days") || "";
+  $("auto").value = localStorage.getItem("tokens.auto") || "0";
+} catch {}
+// Reconnect a previously picked folder (Chrome/Edge), if permission is still granted.
+(async () => {
+  try {
+    const h = await idbGet("dir");
+    if (!h) return;
+    dirHandle = h;
+    if (await ensurePerm(h, false)) { schedule(); scanHandle(true); }
+    else $("dropMsg").innerHTML = `Previously connected to <b>${h.name}/</b> — click <b>&#8635; Refresh</b> to reconnect.`;
+  } catch {}
+})();
 
 </script>
 </body>

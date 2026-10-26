@@ -20,3 +20,14 @@ Then click **Load folder** and pick your `~/.claude/projects` folder.
 
 The hosted page still reads logs only from *your* machine when you load them —
 your usage data never goes to GitHub or anyone else.
+
+## Seeing new chats (live refresh)
+
+In Chrome or Edge, click **Connect folder** and pick your `~/.claude/projects`
+folder. The **↻ Refresh** button then re-reads that folder so chats you've had
+since you loaded it show up, and **Auto** re-reads every 30s/1m/5m. The folder
+reconnects on your next visit (one click to re-grant access). Other browsers
+fall back to **Pick files** / drag-and-drop, which load a one-time snapshot.
+
+Only Claude Code sessions saved on this computer (`~/.claude/projects`) appear.
+Sessions you run on the web/cloud aren't stored locally, so they won't show here.
